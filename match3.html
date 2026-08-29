@@ -79,7 +79,7 @@
         <h1>🎮 Match 3</h1>
         <div class="score-board">Score: <span id="score">0</span></div>
         <canvas id="canvas"></canvas>
-        <p class="instructions">Click a tile, then click an adjacent tile to swap. Make 3+ matching colors!</p>
+        <p class="instructions">Tap a tile then tap an adjacent tile to swap, or drag from one tile to an adjacent tile. Make 3+ matching colors!</p>
     </div>
 
     <script>
@@ -289,12 +289,20 @@
         }
 
         // --- State machine ---
-        const STATES = { IDLE: 'idle', SWAPPING: 'swapping', CLEARING: 'clearing', REFILLING: 'refilling' };
+        const STATES = { IDLE: 'idle', SWAPPING: 'swapping', CLEARING: 'clearing', REFILLING: 'refilling', DRAGGING: 'dragging' };
         let state = STATES.IDLE;
         let grid = [];
         let selectedTile = null;
         let score = 0;
         let comboCount = 0;
+
+        // --- Drag state ---
+        const DRAG_THRESHOLD = 0.5; // fraction of tileSizePx to trigger drag
+        let isDragging = false;
+        let dragStartRow = -1, dragStartCol = -1;
+        let dragEndRow = -1, dragEndCol = -1;
+        let dragStartX = 0, dragStartY = 0; // raw client coords for delta calc
+        let dragActive = false; // true once we've moved past threshold
 
         // --- Swap tiles ---
         async function handleSwap(r1, c1, r2, c2) {
@@ -526,7 +534,7 @@
             }
 
             // Draw selection highlight
-            if (selectedTile && state === STATES.IDLE) {
+            if (selectedTile && state === STATES.IDLE && !dragActive) {
                 const { r, c } = selectedTile;
                 ctx.strokeStyle = '#FFD700';
                 ctx.lineWidth = 3;
@@ -540,6 +548,42 @@
                 ctx.lineWidth = 5;
                 ctx.strokeRect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE);
                 ctx.shadowBlur = 0;
+            }
+
+            // Draw drag visual feedback
+            if (isDragging && state === STATES.IDLE && dragActive) {
+                // Draw arrow from start to end
+                const sx = dragStartCol * TILE_SIZE + TILE_SIZE / 2;
+                const sy = dragStartRow * TILE_SIZE + TILE_SIZE / 2;
+                const ex = dragEndCol * TILE_SIZE + TILE_SIZE / 2;
+                const ey = dragEndRow * TILE_SIZE + TILE_SIZE / 2;
+
+                // Draw directional arrow
+                ctx.strokeStyle = 'rgba(255, 215, 0, 0.7)';
+                ctx.lineWidth = 4;
+                ctx.lineCap = 'round';
+                ctx.beginPath();
+                ctx.moveTo(sx, sy);
+                ctx.lineTo(ex, ey);
+                ctx.stroke();
+
+                // Arrowhead
+                const headLen = 12;
+                const angle = Math.atan2(ey - sy, ex - sx);
+                ctx.fillStyle = 'rgba(255, 215, 0, 0.8)';
+                ctx.beginPath();
+                ctx.moveTo(ex, ey);
+                ctx.lineTo(ex - headLen * Math.cos(angle - Math.PI / 6), ey - headLen * Math.sin(angle - Math.PI / 6));
+                ctx.lineTo(ex - headLen * Math.cos(angle + Math.PI / 6), ey - headLen * Math.sin(angle + Math.PI / 6));
+                ctx.closePath();
+                ctx.fill();
+
+                // Highlight target tile
+                ctx.strokeStyle = 'rgba(255, 215, 0, 0.6)';
+                ctx.lineWidth = 3;
+                ctx.setLineDash([6, 4]);
+                ctx.strokeRect(dragEndCol * TILE_SIZE + 1, dragEndRow * TILE_SIZE + 1, TILE_SIZE - 2, TILE_SIZE - 2);
+                ctx.setLineDash([]);
             }
 
             // Draw particles
@@ -586,40 +630,130 @@
             };
         }
 
-        function handleInput(clientX, clientY) {
+        // --- Drag helpers ---
+        function startDrag(clientX, clientY) {
             if (state !== STATES.IDLE) return;
-
             const { col, row } = getInputCoords(clientX, clientY);
             if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return;
 
+            // Click-then-click: if a tile is already selected, treat as swap/deselect
             if (selectedTile) {
                 if (selectedTile.r === row && selectedTile.c === col) {
+                    // Tapped the same tile — deselect
                     selectedTile = null;
+                    isDragging = false;
+                    dragActive = false;
                 } else {
+                    // Tapped a different tile — swap
                     handleSwap(selectedTile.r, selectedTile.c, row, col);
-                    selectedTile = null;
                 }
-            } else {
-                selectedTile = { r: row, c: col };
+                return;
             }
+
+            dragStartRow = row;
+            dragStartCol = col;
+            dragEndRow = row;
+            dragEndCol = col;
+            dragStartX = clientX;
+            dragStartY = clientY;
+            isDragging = true;
+            dragActive = false;
+            selectedTile = { r: row, c: col };
         }
 
-        // Mouse events
+        function updateDrag(clientX, clientY) {
+            if (!isDragging || state !== STATES.IDLE) return;
+
+            // Compute distance from start (using canvas rect-relative coords)
+            const rect = canvas.getBoundingClientRect();
+            const dx = Math.abs(clientX - rect.left - (dragStartX - rect.left));
+            const dy = Math.abs(clientY - rect.top - (dragStartY - rect.top));
+
+            // Check if we've exceeded the drag threshold
+            if (!dragActive) {
+                if (dx > tileSizePx * DRAG_THRESHOLD || dy > tileSizePx * DRAG_THRESHOLD) {
+                    dragActive = true;
+                    // Deselect the tile so it doesn't stay highlighted while dragging
+                    selectedTile = null;
+                } else {
+                    // Within threshold — keep the selected tile highlighted (tap mode)
+                    return;
+                }
+            }
+
+            const { col, row } = getInputCoords(clientX, clientY);
+            // Clamp to grid bounds
+            dragEndRow = Math.max(0, Math.min(ROWS - 1, row));
+            dragEndCol = Math.max(0, Math.min(COLS - 1, col));
+        }
+
+        function endDrag() {
+            if (!isDragging || state !== STATES.IDLE) {
+                // Clean up in case we're exiting from an invalid state
+                isDragging = false;
+                dragActive = false;
+                selectedTile = null;
+                return;
+            }
+            isDragging = false;
+
+            // If we never became an active drag, this was a tap — leave selection as-is
+            if (!dragActive) {
+                return;
+            }
+
+            // Only swap if dragged to an adjacent cell
+            const dr = Math.abs(dragEndRow - dragStartRow);
+            const dc = Math.abs(dragEndCol - dragStartCol);
+            if (dr + dc === 1) {
+                handleSwap(dragStartRow, dragStartCol, dragEndRow, dragEndCol);
+            }
+
+            // Reset drag state
+            dragStartRow = -1; dragStartCol = -1;
+            dragEndRow = -1; dragEndCol = -1;
+            dragActive = false;
+        }
+
+        // --- Mouse events ---
         canvas.addEventListener('mousedown', (e) => {
-            handleInput(e.clientX, e.clientY);
+            startDrag(e.clientX, e.clientY);
         });
 
-        // Touch events with scroll prevention
+        window.addEventListener('mousemove', (e) => {
+            updateDrag(e.clientX, e.clientY);
+        });
+
+        window.addEventListener('mouseup', (e) => {
+            endDrag();
+        });
+
+        // --- Touch events with scroll prevention ---
         canvas.addEventListener('touchstart', (e) => {
             e.preventDefault();
             if (e.touches.length === 1) {
-                handleInput(e.touches[0].clientX, e.touches[0].clientY);
+                startDrag(e.touches[0].clientX, e.touches[0].clientY);
             }
         }, { passive: false });
 
         canvas.addEventListener('touchmove', (e) => {
             e.preventDefault();
+            if (e.touches.length === 1) {
+                updateDrag(e.touches[0].clientX, e.touches[0].clientY);
+            }
         }, { passive: false });
+
+        canvas.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            endDrag();
+        });
+
+        canvas.addEventListener('touchcancel', (e) => {
+            e.preventDefault();
+            isDragging = false;
+            dragActive = false;
+            selectedTile = null;
+        });
 
         // --- Game loop ---
         let lastTime = 0;
