@@ -683,8 +683,21 @@
 
             const { col, row } = getInputCoords(clientX, clientY);
             // Clamp to grid bounds
-            dragEndRow = Math.max(0, Math.min(ROWS - 1, row));
-            dragEndCol = Math.max(0, Math.min(COLS - 1, col));
+            const clampedRow = Math.max(0, Math.min(ROWS - 1, row));
+            const clampedCol = Math.max(0, Math.min(COLS - 1, col));
+
+            // Determine dominant drag direction and clamp to nearest valid adjacent cell
+            const dRow = clampedRow - dragStartRow;
+            const dCol = clampedCol - dragStartCol;
+            if (Math.abs(dRow) >= Math.abs(dCol)) {
+                // Vertical drag: clamp to same column, limit to ±1 row
+                dragEndRow = dragStartRow + Math.max(-1, Math.min(1, dRow));
+                dragEndCol = dragStartCol;
+            } else {
+                // Horizontal drag: clamp to same row, limit to ±1 col
+                dragEndRow = dragStartRow;
+                dragEndCol = dragStartCol + Math.max(-1, Math.min(1, dCol));
+            }
         }
 
         function endDrag() {
