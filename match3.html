@@ -48,8 +48,7 @@
             box-shadow: 0 10px 30px rgba(0,0,0,0.3);
             background: rgba(0,0,0,0.3);
             cursor: default;
-            max-width: 95vw;
-            max-height: 70vh;
+            /* No max-width/height — JS sets exact pixel dimensions to keep canvas coords = CSS coords */
             image-rendering: -webkit-optimize-contrast;
             image-rendering: crisp-edges;
         }
@@ -111,6 +110,10 @@
             tileSizePx = Math.max(tileSizePx, 28); // minimum for tiny screens
         }
 
+        // Track exact CSS display dimensions (bypasses getBoundingClientRect quirks on mobile)
+        let cssWidth = 0;
+        let cssHeight = 0;
+
         function resizeCanvas() {
             computeTileSize();
             dpr = window.devicePixelRatio || 1;
@@ -120,6 +123,8 @@
             canvas.height = h * dpr;
             canvas.style.width = w + 'px';
             canvas.style.height = h + 'px';
+            cssWidth = w;
+            cssHeight = h;
             // Redraw if grid is already initialized (not during startup)
             if (grid && grid.length > 0) {
                 draw();
@@ -573,10 +578,11 @@
 
         // --- Input handling ---
         function getInputCoords(clientX, clientY) {
+            // Use tracked CSS dimensions for size (reliable on mobile HiDPI screens)
+            // but getBoundingClientRect for offset (handles flex centering perfectly)
             const rect = canvas.getBoundingClientRect();
             const x = clientX - rect.left;
             const y = clientY - rect.top;
-            // Use tileSizePx for grid coordinate conversion (matches current display size)
             return {
                 col: Math.floor(x / tileSizePx),
                 row: Math.floor(y / tileSizePx),
