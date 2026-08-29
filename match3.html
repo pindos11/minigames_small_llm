@@ -471,12 +471,9 @@
         // --- Drawing ---
         function draw() {
             const ctx = canvas.getContext('2d');
-            ctx.setTransform(1, 0, 0, 1, 0, 0); // reset before scaling
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-            // Scale context so that TILE_SIZE=60 units map to tileSizePx screen pixels
             const scale = tileSizePx / TILE_SIZE;
-            ctx.scale(scale, scale);
+            ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
+            ctx.clearRect(0, 0, COLS * TILE_SIZE, ROWS * TILE_SIZE);
 
             // Draw grid background
             for (let r = 0; r < ROWS; r++) {

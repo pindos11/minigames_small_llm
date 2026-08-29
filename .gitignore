@@ -1,6 +1,9 @@
 # Batch files
 *.bat
 
+# Server scripts
+server.py
+
 # llama.cpp
 **/llama.cpp/
 **/llama.cpp
