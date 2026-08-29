@@ -3,6 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#667eea">
+    <link rel="manifest" href="manifest.json">
     <title>Match 3</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -81,6 +83,17 @@
         <canvas id="canvas"></canvas>
         <p class="instructions">Tap a tile then tap an adjacent tile to swap, or drag from one tile to an adjacent tile. Make 3+ matching colors!</p>
     </div>
+
+    <!-- Service Worker Registration -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./sw.js')
+                    .then((reg) => console.log('SW registered:', reg.scope))
+                    .catch((err) => console.error('SW registration failed:', err));
+            });
+        }
+    </script>
 
     <script>
         const canvas = document.getElementById('canvas');
