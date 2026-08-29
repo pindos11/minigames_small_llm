@@ -1,0 +1,6 @@
+# Batch files
+*.bat
+
+# llama.cpp
+**/llama.cpp/
+**/llama.cpp

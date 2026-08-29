@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minigames Collection</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            color: #fff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        h1 {
+            font-size: 48px;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #0f0, #0ff, #f0f);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-shadow: 0 0 20px rgba(0, 255, 0, 0.3);
+        }
+        .subtitle {
+            color: #888;
+            font-size: 18px;
+        }
+        .games-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 30px;
+            max-width: 1200px;
+            width: 100%;
+        }
+        .game-card {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 30px;
+            text-align: center;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .game-card:hover {
+            transform: translateY(-10px);
+            background: rgba(255, 255, 255, 0.15);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+            border-color: #0f0;
+        }
+        .game-card::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(0, 255, 0, 0.1) 0%, transparent 70%);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        .game-card:hover::before {
+            opacity: 1;
+        }
+        .game-icon {
+            width: 80px;
+            height: 80px;
+            border-radius: 15px;
+            margin: 0 auto 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 40px;
+            background: linear-gradient(135deg, #1a1a2e, #0f3460);
+            border: 2px solid #0f0;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.3);
+        }
+        .game-title {
+            font-size: 24px;
+            margin-bottom: 10px;
+            color: #0f0;
+        }
+        .game-description {
+            color: #aaa;
+            font-size: 14px;
+            margin-bottom: 20px;
+            line-height: 1.6;
+        }
+        .game-status {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+            margin-bottom: 15px;
+        }
+        .status-available {
+            background: rgba(0, 255, 0, 0.2);
+            color: #0f0;
+            border: 1px solid #0f0;
+        }
+        .status-unavailable {
+            background: rgba(255, 0, 0, 0.2);
+            color: #f00;
+            border: 1px solid #f00;
+        }
+        .game-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #0f0, #0a7);
+            color: #000;
+        }
+        .btn-primary:hover {
+            transform: scale(1.05);
+            box-shadow: 0 5px 20px rgba(0, 255, 0, 0.4);
+        }
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+        }
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        .no-games {
+            grid-column: 1 / -1;
+            text-align: center;
+            padding: 60px;
+            color: #666;
+        }
+        footer {
+            margin-top: 50px;
+            color: #666;
+            font-size: 14px;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal.active {
+            display: flex;
+        }
+        .modal-content {
+            background: #1a1a2e;
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 800px;
+            width: 90%;
+            text-align: center;
+            border: 2px solid #0f0;
+            box-shadow: 0 0 50px rgba(0, 255, 0, 0.3);
+        }
+        .modal-content h2 {
+            color: #0f0;
+            margin-bottom: 20px;
+        }
+        .modal-content p {
+            color: #aaa;
+            margin-bottom: 30px;
+            line-height: 1.8;
+        }
+        .close-modal {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            color: #666;
+            font-size: 30px;
+            cursor: pointer;
+            transition: color 0.3s;
+        }
+        .close-modal:hover {
+            color: #fff;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>🎮 Minigames Collection</h1>
+        <p class="subtitle">Welcome to your interactive gaming hub!</p>
+    </header>
+
+    <div class="games-grid" id="gamesGrid">
+        <!-- Games will be rendered here -->
+    </div>
+
+    <footer>
+        © 2026
+    </footer>
+
+    <!-- Game Modal -->
+    <div class="modal" id="gameModal">
+        <div class="modal-content">
+            <span class="close-modal" onclick="closeModal()">&times;</span>
+            <h2 id="modalTitle">Game Title</h2>
+            <p id="modalDescription">Game description goes here.</p>
+            <div class="game-actions">
+                <a href="space_invaders.html" class="btn btn-primary" id="modalPlayBtn">Play Game</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Game collection data
+        const games = [
+            {
+                id: 'space-invaders',
+                title: 'Space Invaders',
+                icon: '🚀',
+                description: 'Classic space shooter! Defend Earth from alien invaders. Use arrow keys to move and space to shoot. Survive the waves!',
+                status: 'available',
+                controls: 'Arrow Keys to Move | Space to Shoot | R to Restart',
+                url: 'space_invaders.html',
+                highScore: 0
+            },
+            {
+                id: 'match3',
+                title: 'Match 3',
+                icon: '💎',
+                description: 'Match colorful gems to score points! Swap adjacent tiles to create lines of three or more. Clear all gems to win!',
+                status: 'available',
+                controls: 'Click and Drag to Swap Gems',
+                url: 'match3.html',
+                highScore: 0
+            }
+        ];
+
+        let currentModalId = null;
+
+        // Render game cards
+        function renderGames() {
+            const grid = document.getElementById('gamesGrid');
+            
+            games.forEach(game => {
+                const card = document.createElement('div');
+                card.className = 'game-card';
+                card.onclick = () => openModal(game.id);
+                
+                const icon = document.createElement('div');
+                icon.className = 'game-icon';
+                icon.textContent = game.icon;
+                
+                const title = document.createElement('div');
+                title.className = 'game-title';
+                title.textContent = game.title;
+                
+                const description = document.createElement('div');
+                description.className = 'game-description';
+                description.textContent = game.description;
+                
+                const status = document.createElement('span');
+                status.className = `game-status status-${game.status}`;
+                status.textContent = game.status === 'available' ? 'Available' : 'Under Development';
+                
+                const actions = document.createElement('div');
+                actions.className = 'game-actions';
+                
+                const link = document.createElement('a');
+                link.className = game.status === 'available' ? 'btn btn-primary' : 'btn btn-secondary';
+                link.href = game.url || '#';
+                link.textContent = game.status === 'available' ? '▶ Play Now' : '⏳ Coming Soon';
+                if (game.status !== 'available') {
+                    link.removeAttribute('href');
+                }
+                
+                actions.appendChild(link);
+                
+                card.appendChild(icon);
+                card.appendChild(title);
+                card.appendChild(description);
+                card.appendChild(status);
+                card.appendChild(actions);
+                
+                grid.appendChild(card);
+            });
+        }
+
+        // Open modal
+        function openModal(gameId) {
+            currentModalId = gameId;
+            const game = games.find(g => g.id === gameId);
+            document.getElementById('modalTitle').textContent = game.title;
+            document.getElementById('modalDescription').textContent = game.description + '\n\n' + game.controls;
+            const modalBtn = document.getElementById('modalPlayBtn');
+            if (game.status === 'available') {
+                modalBtn.href = game.url || '#';
+                modalBtn.style.display = 'inline-block';
+            } else {
+                modalBtn.style.display = 'none';
+            }
+            document.getElementById('gameModal').classList.add('active');
+        }
+
+        // Close modal
+        function closeModal() {
+            document.getElementById('gameModal').classList.remove('active');
+            currentModalId = null;
+        }
+
+        // Close modal when clicking outside
+        document.getElementById('gameModal').onclick = (e) => {
+            if (e.target.id === 'gameModal') {
+                closeModal();
+            }
+        };
+
+        // Keyboard shortcut to close modal
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && currentModalId) {
+                closeModal();
+            }
+        });
+
+        // Initialize
+        renderGames();
+    </script>
+</body>
+</html>

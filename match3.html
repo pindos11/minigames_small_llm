@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Match 3</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        .game-container { text-align: center; }
+        h1 {
+            color: white;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        .score-board {
+            background: rgba(255,255,255,0.2);
+            border-radius: 10px;
+            padding: 15px 30px;
+            margin-bottom: 15px;
+            color: white;
+            font-size: 24px;
+        }
+        #canvas {
+            border: 4px solid white;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            background: rgba(0,0,0,0.3);
+            cursor: default;
+        }
+        .instructions {
+            color: white;
+            margin-top: 15px;
+            font-size: 14px;
+            opacity: 0.9;
+        }
+        .combo-text {
+            position: absolute;
+            color: #FFD700;
+            font-size: 36px;
+            font-weight: bold;
+            pointer-events: none;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+            animation: floatUp 1s ease-out forwards;
+        }
+        @keyframes floatUp {
+            0% { opacity: 1; transform: translateY(0) scale(1); }
+            100% { opacity: 0; transform: translateY(-60px) scale(1.5); }
+        }
+    </style>
+</head>
+<body>
+    <div class="game-container">
+        <h1>🎮 Match 3</h1>
+        <div class="score-board">Score: <span id="score">0</span></div>
+        <canvas id="canvas"></canvas>
+        <p class="instructions">Click a tile, then click an adjacent tile to swap. Make 3+ matching colors!</p>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const scoreElement = document.getElementById('score');
+
+        // --- Configuration ---
+        const COLS = 8;
+        const ROWS = 10;
+        const TILE_SIZE = 60;
+        const GRID_WIDTH = COLS * TILE_SIZE;
+        const GRID_HEIGHT = ROWS * TILE_SIZE;
+        const ANIM_DURATION = 300; // ms
+        const CLEAR_DURATION = 400; // ms
+        const FALL_DURATION = 500; // ms
+
+        canvas.width = GRID_WIDTH;
+        canvas.height = GRID_HEIGHT;
+
+        const COLORS = [
+            '#FF6B6B', // Red
+            '#4ECDC4', // Teal
+            '#45B7D1', // Blue
+            '#96CEB4', // Green
+            '#FFEAA7', // Yellow
+            '#DDA0DD', // Purple
+        ];
+
+        // --- Animation system ---
+        const animations = []; // { tile, prop, startVal, endVal, startTime, duration, easing }
+
+        function easeOutCubic(t) {
+            return 1 - Math.pow(1 - t, 3);
+        }
+
+        function easeInBack(t) {
+            const c1 = 1.70158;
+            const c3 = c1 + 1;
+            return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+        }
+
+        function addAnimation(tile, prop, endVal, duration, easing) {
+            animations.push({
+                tile,
+                prop,
+                startVal: tile[prop],
+                endVal,
+                startTime: performance.now(),
+                duration,
+                easing: easing || easeOutCubic,
+            });
+        }
+
+        function updateAnimations(now) {
+            for (let i = animations.length - 1; i >= 0; i--) {
+                const a = animations[i];
+                const elapsed = now - a.startTime;
+                const t = Math.min(elapsed / a.duration, 1);
+                const easedT = a.easing(t);
+                a.tile[a.prop] = a.startVal + (a.endVal - a.startVal) * easedT;
+                if (t >= 1) {
+                    a.tile[a.prop] = a.endVal;
+                    animations.splice(i, 1);
+                }
+            }
+        }
+
+        function waitForAnimations() {
+            return new Promise(resolve => {
+                const check = () => {
+                    if (animations.length === 0) resolve();
+                    else requestAnimationFrame(check);
+                };
+                requestAnimationFrame(check);
+            });
+        }
+
+        // --- Tile creation ---
+        function createTile(row, col, colorIndex) {
+            return {
+                row, col,
+                colorIndex,
+                x: col * TILE_SIZE,
+                y: row * TILE_SIZE,
+                scale: 1,
+                alpha: 1,
+            };
+        }
+
+        // --- Grid initialization ---
+        function initGrid() {
+            grid = [];
+            for (let r = 0; r < ROWS; r++) {
+                grid[r] = [];
+                for (let c = 0; c < COLS; c++) {
+                    let colorIndex;
+                    do {
+                        colorIndex = Math.floor(Math.random() * COLORS.length);
+                    } while (
+                        (c >= 2 && grid[r][c-1].colorIndex === colorIndex && grid[r][c-2].colorIndex === colorIndex) ||
+                        (r >= 2 && grid[r-1][c].colorIndex === colorIndex && grid[r-2][c].colorIndex === colorIndex)
+                    );
+                    grid[r][c] = createTile(r, c, colorIndex);
+                }
+            }
+        }
+
+        // --- Match detection ---
+        function findMatches() {
+            const matches = new Set();
+
+            // Horizontal
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS - 2; c++) {
+                    if (grid[r][c] && grid[r][c+1] && grid[r][c+2]) {
+                        const color = grid[r][c].colorIndex;
+                        if (grid[r][c+1].colorIndex === color && grid[r][c+2].colorIndex === color) {
+                            matches.add(r * COLS + c);
+                            matches.add(r * COLS + c + 1);
+                            matches.add(r * COLS + c + 2);
+                        }
+                    }
+                }
+            }
+
+            // Vertical
+            for (let c = 0; c < COLS; c++) {
+                for (let r = 0; r < ROWS - 2; r++) {
+                    if (grid[r][c] && grid[r+1][c] && grid[r+2][c]) {
+                        const color = grid[r][c].colorIndex;
+                        if (grid[r+1][c].colorIndex === color && grid[r+2][c].colorIndex === color) {
+                            matches.add(r * COLS + c);
+                            matches.add((r+1) * COLS + c);
+                            matches.add((r+2) * COLS + c);
+                        }
+                    }
+                }
+            }
+
+            return matches;
+        }
+
+        // --- Particles ---
+        const particles = [];
+
+        function spawnParticles(row, col, colorIndex) {
+            const cx = col * TILE_SIZE + TILE_SIZE / 2;
+            const cy = row * TILE_SIZE + TILE_SIZE / 2;
+            for (let i = 0; i < 8; i++) {
+                const angle = (Math.PI * 2 * i) / 8 + Math.random() * 0.5;
+                const speed = 80 + Math.random() * 120;
+                particles.push({
+                    x: cx,
+                    y: cy,
+                    vx: Math.cos(angle) * speed,
+                    vy: Math.sin(angle) * speed - 40,
+                    life: 1,
+                    color: COLORS[colorIndex],
+                    size: 3 + Math.random() * 4,
+                });
+            }
+        }
+
+        function updateParticles(dt) {
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.x += p.vx * dt;
+                p.y += p.vy * dt;
+                p.vy += 200 * dt; // gravity
+                p.life -= dt * 2;
+                if (p.life <= 0) {
+                    particles.splice(i, 1);
+                }
+            }
+        }
+
+        // --- State machine ---
+        const STATES = { IDLE: 'idle', SWAPPING: 'swapping', CLEARING: 'clearing', REFILLING: 'refilling' };
+        let state = STATES.IDLE;
+        let grid = [];
+        let selectedTile = null;
+        let score = 0;
+        let comboCount = 0;
+
+        // --- Swap tiles ---
+        async function handleSwap(r1, c1, r2, c2) {
+            if (state !== STATES.IDLE) return;
+
+            if (r1 === r2 && c1 === c2) return;
+            if (Math.abs(r1 - r2) + Math.abs(c1 - c2) !== 1) return;
+
+            state = STATES.SWAPPING;
+            selectedTile = null;
+
+            const tile1 = grid[r1][c1];
+            const tile2 = grid[r2][c2];
+
+            // Swap in grid
+            grid[r1][c1] = tile2;
+            grid[r2][c2] = tile1;
+            tile1.row = r2; tile1.col = c2;
+            tile2.row = r1; tile2.col = c1;
+
+            // Animate swap
+            addAnimation(tile1, 'x', c2 * TILE_SIZE, ANIM_DURATION, easeOutCubic);
+            addAnimation(tile1, 'y', r2 * TILE_SIZE, ANIM_DURATION, easeOutCubic);
+            addAnimation(tile2, 'x', c1 * TILE_SIZE, ANIM_DURATION, easeOutCubic);
+            addAnimation(tile2, 'y', r1 * TILE_SIZE, ANIM_DURATION, easeOutCubic);
+
+            await waitForAnimations();
+
+            const matches = findMatches();
+            if (matches.size > 0) {
+                await processMatches();
+            } else {
+                // Swap back
+                grid[r1][c1] = tile1;
+                grid[r2][c2] = tile2;
+                tile1.row = r1; tile1.col = c1;
+                tile2.row = r2; tile2.col = c2;
+
+                addAnimation(tile1, 'x', c1 * TILE_SIZE, ANIM_DURATION, easeOutCubic);
+                addAnimation(tile1, 'y', r1 * TILE_SIZE, ANIM_DURATION, easeOutCubic);
+                addAnimation(tile2, 'x', c2 * TILE_SIZE, ANIM_DURATION, easeOutCubic);
+                addAnimation(tile2, 'y', r2 * TILE_SIZE, ANIM_DURATION, easeOutCubic);
+
+                await waitForAnimations();
+                state = STATES.IDLE;
+            }
+        }
+
+        // --- Match processing chain ---
+        async function processMatches() {
+            comboCount = 0;
+
+            while (true) {
+                const matches = findMatches();
+                if (matches.size === 0) break;
+
+                comboCount++;
+                const comboMult = Math.max(1, comboCount);
+                const points = matches.size * 10 * comboMult;
+                score += points;
+                scoreElement.textContent = score;
+
+                // Spawn particles and shrink animation
+                const matchTiles = Array.from(matches).map(id => {
+                    const r = Math.floor(id / COLS);
+                    const c = id % COLS;
+                    return { tile: grid[r][c], row: r, col: c };
+                });
+
+                matchTiles.forEach(({ tile, row, col }) => spawnParticles(row, col, tile.colorIndex));
+
+                // Shrink
+                matchTiles.forEach(({ tile }) => {
+                    addAnimation(tile, 'scale', 0.3, CLEAR_DURATION, easeInBack);
+                    addAnimation(tile, 'alpha', 0, CLEAR_DURATION, easeInBack);
+                });
+
+                await waitForAnimations();
+
+                // Remove matched tiles from grid
+                matchTiles.forEach(({ tile }) => {
+                    grid[tile.row][tile.col] = null;
+                });
+
+                // Drop tiles
+                state = STATES.CLEARING;
+                await dropTiles();
+
+                // Refill
+                state = STATES.REFILLING;
+                await refillTiles();
+
+                state = STATES.IDLE;
+            }
+        }
+
+        // --- Drop tiles with animation ---
+        async function dropTiles() {
+            // First pass: move tiles down in the grid
+            for (let c = 0; c < COLS; c++) {
+                let writePos = ROWS - 1;
+                for (let r = ROWS - 1; r >= 0; r--) {
+                    if (grid[r][c]) {
+                        if (writePos !== r) {
+                            grid[writePos][c] = grid[r][c];
+                            grid[r][c] = null;
+                            grid[writePos][c].row = writePos;
+                        }
+                        writePos--;
+                    }
+                }
+            }
+
+            // Second pass: animate all tiles to their grid positions
+            let needsAnimation = false;
+            for (let c = 0; c < COLS; c++) {
+                for (let r = 0; r < ROWS; r++) {
+                    const tile = grid[r][c];
+                    if (!tile) continue;
+                    const targetY = r * TILE_SIZE;
+                    if (Math.abs(tile.y - targetY) > 1) {
+                        needsAnimation = true;
+                        addAnimation(tile, 'y', targetY, FALL_DURATION, easeOutCubic);
+                    }
+                }
+            }
+
+            if (needsAnimation) {
+                await waitForAnimations();
+            }
+        }
+
+        // --- Refill tiles with animation ---
+        async function refillTiles() {
+            for (let c = 0; c < COLS; c++) {
+                // Count empty slots
+                let emptyCount = 0;
+                for (let r = 0; r < ROWS; r++) {
+                    if (!grid[r][c]) emptyCount++;
+                }
+
+                // Create new tiles starting above the grid
+                for (let r = 0; r < ROWS; r++) {
+                    if (!grid[r][c]) {
+                        const colorIndex = Math.floor(Math.random() * COLORS.length);
+                        // Start position: above visible area
+                        const startY = (r - emptyCount) * TILE_SIZE;
+                        const tile = createTile(r, c, colorIndex);
+                        tile.y = startY;
+                        grid[r][c] = tile;
+                    }
+                }
+            }
+
+            // Animate all tiles to their grid positions
+            let needsAnimation = false;
+            for (let c = 0; c < COLS; c++) {
+                for (let r = 0; r < ROWS; r++) {
+                    const tile = grid[r][c];
+                    if (!tile) continue;
+                    const targetY = r * TILE_SIZE;
+                    if (Math.abs(tile.y - targetY) > 1) {
+                        needsAnimation = true;
+                        addAnimation(tile, 'y', targetY, FALL_DURATION, easeOutCubic);
+                    }
+                }
+            }
+
+            if (needsAnimation) {
+                await waitForAnimations();
+            }
+        }
+
+        // --- Drawing ---
+        function draw() {
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, GRID_WIDTH, GRID_HEIGHT);
+
+            // Draw grid background
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    ctx.fillStyle = (r + c) % 2 === 0 ? 'rgba(0,0,0,0.1)' : 'rgba(0,0,0,0.2)';
+                    ctx.fillRect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                }
+            }
+
+            // Draw tiles
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    const tile = grid[r][c];
+                    if (!tile || tile.alpha <= 0.01) continue;
+
+                    const color = COLORS[tile.colorIndex];
+                    const cx = tile.x + TILE_SIZE / 2;
+                    const cy = tile.y + TILE_SIZE / 2;
+
+                    ctx.save();
+                    ctx.globalAlpha = tile.alpha;
+                    ctx.translate(cx, cy);
+                    ctx.scale(tile.scale, tile.scale);
+                    ctx.translate(-TILE_SIZE / 2, -TILE_SIZE / 2);
+
+                    // Gradient fill
+                    const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, TILE_SIZE / 2);
+                    gradient.addColorStop(0, color);
+                    gradient.addColorStop(1, adjustColor(color, -40));
+
+                    ctx.fillStyle = gradient;
+                    ctx.beginPath();
+                    roundRect(ctx, 2, 2, TILE_SIZE - 4, TILE_SIZE - 4, 8);
+                    ctx.fill();
+
+                    // Border
+                    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+
+                    // Color number
+                    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+                    ctx.font = 'bold 18px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(tile.colorIndex + 1, TILE_SIZE / 2, TILE_SIZE / 2);
+
+                    ctx.restore();
+                }
+            }
+
+            // Draw selection highlight
+            if (selectedTile && state === STATES.IDLE) {
+                const { r, c } = selectedTile;
+                ctx.strokeStyle = '#FFD700';
+                ctx.lineWidth = 3;
+                ctx.setLineDash([8, 4]);
+                ctx.strokeRect(c * TILE_SIZE + 1, r * TILE_SIZE + 1, TILE_SIZE - 2, TILE_SIZE - 2);
+                ctx.setLineDash([]);
+
+                ctx.shadowColor = '#FFD700';
+                ctx.shadowBlur = 10;
+                ctx.strokeStyle = 'rgba(255,215,0,0.5)';
+                ctx.lineWidth = 5;
+                ctx.strokeRect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                ctx.shadowBlur = 0;
+            }
+
+            // Draw particles
+            particles.forEach(p => {
+                ctx.globalAlpha = p.life;
+                ctx.fillStyle = p.color;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            ctx.globalAlpha = 1;
+        }
+
+        function roundRect(ctx, x, y, w, h, r) {
+            ctx.moveTo(x + r, y);
+            ctx.lineTo(x + w - r, y);
+            ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+            ctx.lineTo(x + w, y + h - r);
+            ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+            ctx.lineTo(x + r, y + h);
+            ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+            ctx.lineTo(x, y + r);
+            ctx.quadraticCurveTo(x, y, x + r, y);
+        }
+
+        function adjustColor(color, amount) {
+            const num = parseInt(color.replace('#', ''), 16);
+            const r = Math.max(0, Math.min(255, (num >> 16) + amount));
+            const g = Math.max(0, Math.min(255, ((num >> 8) & 0xFF) + amount));
+            const b = Math.max(0, Math.min(255, (num & 0xFF) + amount));
+            return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+        }
+
+        // --- Input handling ---
+        canvas.addEventListener('mousedown', (e) => {
+            if (state !== STATES.IDLE) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            const col = Math.floor(x / TILE_SIZE);
+            const row = Math.floor(y / TILE_SIZE);
+
+            if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return;
+
+            if (selectedTile) {
+                if (selectedTile.r === row && selectedTile.c === col) {
+                    selectedTile = null;
+                } else {
+                    handleSwap(selectedTile.r, selectedTile.c, row, col);
+                    selectedTile = null;
+                }
+            } else {
+                selectedTile = { r: row, c: col };
+            }
+            draw();
+        });
+
+        // --- Game loop ---
+        let lastTime = 0;
+
+        function gameLoop(timestamp) {
+            const dt = Math.min((timestamp - lastTime) / 1000, 0.1);
+            lastTime = timestamp;
+
+            updateAnimations(timestamp);
+            updateParticles(dt);
+            draw();
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // --- Start ---
+        initGrid();
+        draw();
+        requestAnimationFrame(gameLoop);
+    </script>
+</body>
+</html>
