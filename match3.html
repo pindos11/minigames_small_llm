@@ -10,23 +10,37 @@
             display: flex;
             justify-content: center;
             align-items: center;
-            min-height: 100vh;
+            min-height: 100dvh;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+            touch-action: none;
         }
-        .game-container { text-align: center; }
+        .game-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 1vh;
+            padding: 1vh 0.5vw;
+            max-width: 100vw;
+            max-height: 100dvh;
+        }
         h1 {
             color: white;
-            margin-bottom: 10px;
+            margin-bottom: 0;
             text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+            font-size: clamp(18px, 4.5vmin, 36px);
+            line-height: 1;
         }
         .score-board {
             background: rgba(255,255,255,0.2);
             border-radius: 10px;
-            padding: 15px 30px;
-            margin-bottom: 15px;
+            padding: 0.8vh clamp(10px, 2vw, 20px);
+            margin-bottom: 0;
             color: white;
-            font-size: 24px;
+            font-size: clamp(14px, 3.5vmin, 28px);
+            line-height: 1;
         }
         #canvas {
             border: 4px solid white;
@@ -34,12 +48,17 @@
             box-shadow: 0 10px 30px rgba(0,0,0,0.3);
             background: rgba(0,0,0,0.3);
             cursor: default;
+            max-width: 95vw;
+            max-height: 70vh;
+            image-rendering: -webkit-optimize-contrast;
+            image-rendering: crisp-edges;
         }
         .instructions {
             color: white;
-            margin-top: 15px;
-            font-size: 14px;
+            margin-top: 0;
+            font-size: clamp(10px, 2.2vmin, 15px);
             opacity: 0.9;
+            line-height: 1.2;
         }
         .combo-text {
             position: absolute;
@@ -71,15 +90,41 @@
         // --- Configuration ---
         const COLS = 8;
         const ROWS = 10;
-        const TILE_SIZE = 60;
-        const GRID_WIDTH = COLS * TILE_SIZE;
-        const GRID_HEIGHT = ROWS * TILE_SIZE;
+        const TILE_SIZE = 60; // internal grid unit size (for game logic only)
         const ANIM_DURATION = 300; // ms
         const CLEAR_DURATION = 400; // ms
         const FALL_DURATION = 500; // ms
 
-        canvas.width = GRID_WIDTH;
-        canvas.height = GRID_HEIGHT;
+        // --- Responsive sizing ---
+        let tileSizePx = 60; // current pixel size per tile (computed from viewport)
+        let dpr = window.devicePixelRatio || 1;
+
+        function computeTileSize() {
+            const vh = window.innerHeight * 0.95;
+            const vw = window.innerWidth * 0.95;
+            // Reserve ~22vh for h1 + score + instructions
+            tileSizePx = Math.min(
+                Math.floor(vh * 0.78 / ROWS),
+                Math.floor(vw / COLS),
+                60 // cap at original size
+            );
+            tileSizePx = Math.max(tileSizePx, 28); // minimum for tiny screens
+        }
+
+        function resizeCanvas() {
+            computeTileSize();
+            dpr = window.devicePixelRatio || 1;
+            const w = COLS * tileSizePx;
+            const h = ROWS * tileSizePx;
+            canvas.width = w * dpr;
+            canvas.height = h * dpr;
+            canvas.style.width = w + 'px';
+            canvas.style.height = h + 'px';
+            // Redraw if grid is already initialized (not during startup)
+            if (grid && grid.length > 0) {
+                draw();
+            }
+        }
 
         const COLORS = [
             '#FF6B6B', // Red
@@ -421,7 +466,12 @@
         // --- Drawing ---
         function draw() {
             const ctx = canvas.getContext('2d');
-            ctx.clearRect(0, 0, GRID_WIDTH, GRID_HEIGHT);
+            ctx.setTransform(1, 0, 0, 1, 0, 0); // reset before scaling
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Scale context so that TILE_SIZE=60 units map to tileSizePx screen pixels
+            const scale = tileSizePx / TILE_SIZE;
+            ctx.scale(scale, scale);
 
             // Draw grid background
             for (let r = 0; r < ROWS; r++) {
@@ -522,15 +572,21 @@
         }
 
         // --- Input handling ---
-        canvas.addEventListener('mousedown', (e) => {
+        function getInputCoords(clientX, clientY) {
+            const rect = canvas.getBoundingClientRect();
+            const x = clientX - rect.left;
+            const y = clientY - rect.top;
+            // Use tileSizePx for grid coordinate conversion (matches current display size)
+            return {
+                col: Math.floor(x / tileSizePx),
+                row: Math.floor(y / tileSizePx),
+            };
+        }
+
+        function handleInput(clientX, clientY) {
             if (state !== STATES.IDLE) return;
 
-            const rect = canvas.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
-            const col = Math.floor(x / TILE_SIZE);
-            const row = Math.floor(y / TILE_SIZE);
-
+            const { col, row } = getInputCoords(clientX, clientY);
             if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return;
 
             if (selectedTile) {
@@ -543,8 +599,24 @@
             } else {
                 selectedTile = { r: row, c: col };
             }
-            draw();
+        }
+
+        // Mouse events
+        canvas.addEventListener('mousedown', (e) => {
+            handleInput(e.clientX, e.clientY);
         });
+
+        // Touch events with scroll prevention
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (e.touches.length === 1) {
+                handleInput(e.touches[0].clientX, e.touches[0].clientY);
+            }
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+        }, { passive: false });
 
         // --- Game loop ---
         let lastTime = 0;
@@ -561,8 +633,10 @@
         }
 
         // --- Start ---
+        resizeCanvas(); // sets initial canvas size based on viewport
+        window.addEventListener('resize', resizeCanvas);
+
         initGrid();
-        draw();
         requestAnimationFrame(gameLoop);
     </script>
 </body>
