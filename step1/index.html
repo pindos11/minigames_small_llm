@@ -1,0 +1,1304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Space Shooter — Phase 2</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #info {
+      position: absolute; top: 8px; left: 8px;
+      font: 13px monospace; color: #0f0;
+      pointer-events: none; opacity: 0.8;
+      text-shadow: 0 0 4px #000;
+    }
+    /* ── HUD overlay ── */
+    #hud {
+      position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+      pointer-events: none;
+    }
+    #healthOuter {
+      position: absolute; left: 12px; top: 24px;
+      width: 180px; height: 16px;
+      background: rgba(40,20,20,0.7);
+      border: 1px solid #633;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    #healthInner {
+      height: 100%; width: 100%;
+      background: linear-gradient(90deg, #f22, #f64);
+      border-radius: 3px;
+      transition: width 0.3s;
+    }
+    #healthLabel {
+      position: absolute; left: 12px; top: 25px;
+      font: bold 11px monospace; color: #faa;
+      line-height: 16px;
+      margin-left: 90px;
+      text-shadow: 0 0 4px #000;
+    }
+    #scoreDisplay {
+      position: absolute; right: 16px; top: 10px;
+      font: bold 18px monospace; color: #ff0;
+      text-shadow: 0 0 6px rgba(0,0,0,0.8);
+    }
+    #waveDisplay {
+      position: absolute; right: 16px; top: 34px;
+      font: 13px monospace; color: #f88;
+      text-shadow: 0 0 6px rgba(0,0,0,0.8);
+    }
+    #upgradeDisplay {
+      position: absolute; bottom: 10px; left: 50%;
+      transform: translateX(-50%);
+      font: 12px monospace; color: #8f8;
+      text-align: center;
+      text-shadow: 0 0 4px #000;
+    }
+    /* ── Game Over overlay ── */
+    #gameOver {
+      position: absolute; inset: 0;
+      display: none;
+      flex-direction: column;
+      align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.65);
+      pointer-events: auto;
+    }
+    #gameOver h1 {
+      font: bold 36px monospace; color: #f44;
+      text-shadow: 0 0 20px #f00;
+      margin-bottom: 8px;
+    }
+    #gameOver p {
+      font: 16px monospace; color: #ff8;
+      margin-bottom: 20px;
+    }
+    #gameOver button {
+      font: 18px monospace; padding: 10px 32px;
+      background: #2a2; color: #fff; border: 2px solid #4d4;
+      border-radius: 6px; cursor: pointer;
+      pointer-events: auto;
+    }
+    #gameOver button:hover { background: #3c3; }
+    /* ── Touch hints ── */
+    .touch-zone {
+      position: absolute; bottom: 20px;
+      width: 120px; height: 120px;
+      border-radius: 50%;
+      border: 2px dashed rgba(255,255,255,0.15);
+      display: none;
+    }
+    #touchJoystick { left: 30px; }
+    #touchFireZone  { right: 30px; border-color: rgba(255,100,100,0.2); }
+    @media (hover: none) and (pointer: coarse) {
+      .touch-zone { display: block; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="info">Step 1: WASD=move | Mouse=aim | Scroll=zoom | Click=shoot</div>
+
+  <!-- HUD -->
+  <div id="hud">
+    <div id="healthOuter"><div id="healthInner"></div></div>
+    <div id="healthLabel">HP</div>
+    <div id="scoreDisplay">Score: 0</div>
+    <div id="waveDisplay">Wave 1</div>
+    <div id="upgradeDisplay"></div>
+    <div class="touch-zone" id="touchJoystick"></div>
+    <div class="touch-zone" id="touchFireZone"></div>
+  </div>
+
+  <!-- Game Over -->
+  <div id="gameOver">
+    <h1>GAME OVER</h1>
+    <p id="goScore">Score: 0</p>
+    <button onclick="Game.reset()">Restart</button>
+  </div>
+
+<script>
+// ==========================================================================
+// SECTION 1 — Vector Math
+// ==========================================================================
+const V2 = {
+  add:    (a, b) => [a[0]+b[0], a[1]+b[1]],
+  sub:    (a, b) => [a[0]-b[0], a[1]-b[1]],
+  scale:  (v, s) => [v[0]*s, v[1]*s],
+  len:    v => Math.hypot(v[0], v[1]),
+  norm:   v => { const l = V2.len(v)||1; return [v[0]/l, v[1]/l]; },
+  lerp:   (a, b, t) => [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t],
+  dist:   (a, b) => Math.hypot(a[0]-b[0], a[1]-b[1]),
+};
+
+// ==========================================================================
+// SECTION 2 — WebGL2 Boot
+// ==========================================================================
+const canvas = document.getElementById('game');
+const gl = canvas.getContext('webgl2', { antialias: true, alpha: false });
+if (!gl) throw new Error('WebGL2 not supported');
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width  = window.innerWidth  * dpr;
+  canvas.height = window.innerHeight * dpr;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener('resize', resize);
+resize();
+
+const vsSource = `#version 300 es
+layout(location = 0) in vec2 a_pos;
+layout(location = 1) in vec3 a_col;
+layout(location = 2) in vec2 a_world;
+layout(location = 3) in float a_rot;
+layout(location = 4) in float a_scale;
+
+uniform vec2  u_viewport;
+uniform vec2  u_cam;
+uniform float u_zoom;
+
+out vec3 v_col;
+
+void main() {
+  float c = cos(a_rot), s = sin(a_rot);
+  vec2 worldPos = a_world + a_scale * vec2(a_pos.x * c - a_pos.y * s,
+                                           a_pos.x * s + a_pos.y * c);
+  vec2 viewPos = (worldPos - u_cam) * u_zoom;
+  gl_Position = vec4(viewPos.x / (u_viewport.x * 0.5),
+                   viewPos.y / (u_viewport.y * 0.5),
+                   0.0, 1.0);
+  v_col = a_col;
+}`;
+
+const fsSource = `#version 300 es
+precision mediump float;
+in vec3 v_col;
+out vec4 fragColor;
+void main() { fragColor = vec4(v_col, 1.0); }`;
+
+function makeShader(src, type) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, makeShader(vsSource, gl.VERTEX_SHADER));
+gl.attachShader(prog, makeShader(fsSource, gl.FRAGMENT_SHADER));
+gl.linkProgram(prog);
+gl.useProgram(prog);
+
+const uViewport = gl.getUniformLocation(prog, 'u_viewport');
+const uCam      = gl.getUniformLocation(prog, 'u_cam');
+const uZoom     = gl.getUniformLocation(prog, 'u_zoom');
+
+const FSTRIDE = 9;
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+
+const posBuf   = gl.createBuffer();
+const colBuf   = gl.createBuffer();
+const worldBuf = gl.createBuffer();
+const rotBuf   = gl.createBuffer();
+const scaleBuf = gl.createBuffer();
+
+/* Phase 2: larger batch for bullets, enemies, particles */
+const MAX_VERTS = 16384;
+const MAX_SHAPES = MAX_VERTS / 6;
+
+const posData   = new Float32Array(MAX_VERTS * 2);
+const colData   = new Float32Array(MAX_VERTS * 3);
+const worldData = new Float32Array(MAX_VERTS * 2);
+const rotData   = new Float32Array(MAX_VERTS);
+const scaleData = new Float32Array(MAX_VERTS);
+
+const STRIDE_POS   = 8;
+const STRIDE_COL   = 12;
+const STRIDE_WORLD = 8;
+const STRIDE_ROT   = 4;
+const STRIDE_SCALE = 4;
+
+gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+gl.bufferData(gl.ARRAY_BUFFER, posData.buffer, gl.DYNAMIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, STRIDE_POS, 0);
+
+gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+gl.bufferData(gl.ARRAY_BUFFER, colData.buffer, gl.DYNAMIC_DRAW);
+gl.enableVertexAttribArray(1);
+gl.vertexAttribPointer(1, 3, gl.FLOAT, false, STRIDE_COL, 0);
+
+gl.bindBuffer(gl.ARRAY_BUFFER, worldBuf);
+gl.bufferData(gl.ARRAY_BUFFER, worldData.buffer, gl.DYNAMIC_DRAW);
+gl.enableVertexAttribArray(2);
+gl.vertexAttribPointer(2, 2, gl.FLOAT, false, STRIDE_WORLD, 0);
+
+gl.bindBuffer(gl.ARRAY_BUFFER, rotBuf);
+gl.bufferData(gl.ARRAY_BUFFER, rotData.buffer, gl.DYNAMIC_DRAW);
+gl.enableVertexAttribArray(3);
+gl.vertexAttribPointer(3, 1, gl.FLOAT, false, STRIDE_ROT, 0);
+
+gl.bindBuffer(gl.ARRAY_BUFFER, scaleBuf);
+gl.bufferData(gl.ARRAY_BUFFER, scaleData.buffer, gl.DYNAMIC_DRAW);
+gl.enableVertexAttribArray(4);
+gl.vertexAttribPointer(4, 1, gl.FLOAT, false, STRIDE_SCALE, 0);
+
+gl.bindVertexArray(null);
+
+// ==========================================================================
+// SECTION 3 — Shape Renderer (batched)
+// ==========================================================================
+const Draw = {
+  _count: 0,
+
+  begin() { this._count = 0; },
+
+  rect(worldX, worldY, w, h, angle, r, g, b) {
+    const hsX = w / 2, hsY = h / 2;
+    const corners = [
+      [-hsX, -hsY], [hsX, -hsY], [hsX,  hsY],
+      [-hsX, -hsY], [hsX,  hsY], [-hsX,  hsY],
+    ];
+    const c = [r, g, b];
+    for (const [cx, cy] of corners) {
+      const i = this._count;
+      posData[i*2]     = cx;
+      posData[i*2+1]   = cy;
+      colData[i*3]   = c[0]; colData[i*3+1] = c[1]; colData[i*3+2] = c[2];
+      worldData[i*2] = worldX;
+      worldData[i*2+1] = worldY;
+      rotData[i]     = angle;
+      scaleData[i]   = 1.0;
+      this._count++;
+    }
+  },
+
+  circle(worldX, worldY, radius, r, g, b, segments = 12) {
+    const c = [r, g, b];
+    for (let i = 0; i < segments; i++) {
+      const a0 = (i / segments) * Math.PI * 2;
+      const a1 = ((i + 1) / segments) * Math.PI * 2;
+      const verts = [[0,0],[Math.cos(a0)*radius,Math.sin(a0)*radius],[Math.cos(a1)*radius,Math.sin(a1)*radius]];
+      for (const [vx, vy] of verts) {
+        const idx = this._count;
+        posData[idx*2]     = vx;
+        posData[idx*2+1]   = vy;
+        colData[idx*3]   = c[0]; colData[idx*3+1] = c[1]; colData[idx*3+2] = c[2];
+        worldData[idx*2] = worldX;
+        worldData[idx*2+1] = worldY;
+        rotData[idx]     = 0;
+        scaleData[idx]   = 1.0;
+        this._count++;
+      }
+    }
+  },
+
+  triangle(worldX, worldY, points, angle, r, g, b) {
+    for (const [px, py] of points) {
+      const i = this._count;
+      posData[i*2] = px;
+      posData[i*2+1] = py;
+      colData[i*3] = r; colData[i*3+1] = g; colData[i*3+2] = b;
+      worldData[i*2] = worldX; worldData[i*2+1] = worldY;
+      rotData[i] = angle;
+      scaleData[i] = 1.0;
+      this._count++;
+    }
+  },
+
+  flush(viewportW, viewportH, camX, camY, zoom) {
+    if (this._count === 0) return;
+    gl.useProgram(prog);
+    gl.uniform2f(uViewport, viewportW, viewportH);
+    gl.uniform2f(uCam, camX, camY);
+    gl.uniform1f(uZoom, zoom);
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, posData.subarray(0, this._count * 2));
+    gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, colData.subarray(0, this._count * 3));
+    gl.bindBuffer(gl.ARRAY_BUFFER, worldBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, worldData.subarray(0, this._count * 2));
+    gl.bindBuffer(gl.ARRAY_BUFFER, rotBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, rotData.subarray(0, this._count));
+    gl.bindBuffer(gl.ARRAY_BUFFER, scaleBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, scaleData.subarray(0, this._count));
+    gl.drawArrays(gl.TRIANGLES, 0, this._count);
+    gl.bindVertexArray(null);
+  },
+};
+
+// ==========================================================================
+// SECTION 4 — Camera System
+// ==========================================================================
+const Camera = {
+  x: 0, y: 0,
+  zoom: 1.0,
+  target: null,
+  _smoothX: 0, _smoothY: 0,
+
+  init(x, y, zoom) {
+    this.x = this._smoothX = x || 0;
+    this.y = this._smoothY = y || 0;
+    this.zoom = zoom || 1.0;
+  },
+  follow(obj) { this.target = obj; },
+
+  update(dt) {
+    if (this.target) {
+      const speed = 10;
+      this._smoothX += (this.target.x - this._smoothX) * (1 - Math.exp(-speed * dt));
+      this._smoothY += (this.target.y - this._smoothY) * (1 - Math.exp(-speed * dt));
+    }
+    this.x = this._smoothX;
+    this.y = this._smoothY;
+  },
+
+  worldToScreen(wx, wy) {
+    const viewX = (wx - this.x) * this.zoom;
+    const viewY = (wy - this.y) * this.zoom;
+    const sx = (viewX / canvas.width * 2 + 1) * canvas.width / 2;
+    const sy = (1 - viewY / canvas.height * 2) * canvas.height / 2;
+    return [sx, sy];
+  },
+
+  screenToWorld(sx, sy) {
+    const ndcX = (sx / canvas.width) * 2 - 1;
+    const ndcY = -(sy / canvas.height) * 2 + 1;
+    const wx = ndcX / this.zoom * canvas.width / 2 + this.x;
+    const wy = ndcY / this.zoom * canvas.height / 2 + this.y;
+    return [wx, wy];
+  },
+};
+
+// ==========================================================================
+// SECTION 5 — Input Handling  (EXTENDED: shoot trigger + touch)
+// ==========================================================================
+const Input = {
+  keys: {},
+  mouse: { x: 0, y: 0, wx: 0, wy: 0, down: false, clicked: false },
+  shoot: false,
+  touch: {
+    active: false, joystickBaseX: 0, joystickBaseY: 0,
+    joyX: 0, joyY: 0, firing: false,
+  },
+  isTouchDevice: false,
+
+  init() {
+    window.addEventListener('keydown', e => { this.keys[e.key.toLowerCase()] = true; e.preventDefault(); });
+    window.addEventListener('keyup',   e => { this.keys[e.key.toLowerCase()] = false; });
+
+    canvas.addEventListener('mousemove', e => {
+      const r = canvas.getBoundingClientRect();
+      this.mouse.x = e.clientX - r.left;
+      this.mouse.y = e.clientY - r.top;
+      this.updateWorld();
+    });
+    canvas.addEventListener('mouseleave', () => {
+      this.mouse.x = canvas.clientWidth / 2;
+      this.mouse.y = canvas.clientHeight / 2;
+      this.updateWorld();
+    });
+
+    canvas.addEventListener('mousedown', e => {
+      if (e.button === 0) { this.mouse.down = true; this.mouse.clicked = true; this.shoot = true; }
+    });
+    canvas.addEventListener('mouseup', e => {
+      if (e.button === 0) this.mouse.down = false;
+      if (e.button === 0) this.shoot = false;
+    });
+
+    canvas.addEventListener('wheel', e => {
+      e.preventDefault();
+      Camera.zoom *= e.deltaY > 0 ? 0.9 : 1.1;
+      Camera.zoom = Math.max(0.2, Math.min(5, Camera.zoom));
+    }, { passive: false });
+
+    /* ── Touch ── */
+    canvas.addEventListener('touchstart', e => {
+      e.preventDefault();
+      this.isTouchDevice = true;
+      for (const t of e.changedTouches) {
+        const cx = t.clientX, cy = t.clientY;
+        if (cx < window.innerWidth / 2) {
+          this.touch.active = true;
+          this.touch.joystickBaseX = cx;
+          this.touch.joystickBaseY = cy;
+          this.touch.joyX = 0;
+          this.touch.joyY = 0;
+        } else {
+          this.touch.firing = true;
+          this.shoot = true;
+        }
+      }
+    }, { passive: false });
+
+    canvas.addEventListener('touchmove', e => {
+      e.preventDefault();
+      for (const t of e.changedTouches) {
+        if (this.touch.active && t.clientX < window.innerWidth / 2) {
+          const dx = t.clientX - this.touch.joystickBaseX;
+          const dy = t.clientY - this.touch.joystickBaseY;
+          const maxDist = 50;
+          const dist = Math.min(Math.hypot(dx, dy), maxDist);
+          const angle = Math.atan2(dy, dx);
+          this.touch.joyX = (Math.cos(angle) * dist) / maxDist;
+          this.touch.joyY = (Math.sin(angle) * dist) / maxDist;
+        }
+      }
+    }, { passive: false });
+
+    canvas.addEventListener('touchend', e => {
+      e.preventDefault();
+      for (const t of e.changedTouches) {
+        if (t.clientX < window.innerWidth / 2) {
+          this.touch.active = false;
+          this.touch.joyX = 0;
+          this.touch.joyY = 0;
+        } else {
+          this.touch.firing = false;
+          this.shoot = false;
+        }
+      }
+    }, { passive: false });
+
+    canvas.addEventListener('touchcancel', e => {
+      this.touch.active = false; this.touch.firing = false;
+      this.touch.joyX = 0; this.touch.joyY = 0;
+      this.shoot = false;
+    });
+  },
+
+  updateWorld() {
+    const r = canvas.getBoundingClientRect();
+    const [wx, wy] = Camera.screenToWorld(
+      this.mouse.x * (canvas.width / r.width),
+      this.mouse.y * (canvas.height / r.height));
+    this.mouse.wx = wx;
+    this.mouse.wy = wy;
+  },
+
+  tick() { this.mouse.clicked = false; },
+
+  isDown(key) { return !!this.keys[key.toLowerCase()]; },
+
+  isShooting() { return this.shoot || this.touch.firing; },
+
+  getDir() {
+    if (this.touch.active) return [this.touch.joyX, this.touch.joyY];
+    let x = 0, y = 0;
+    if (this.isDown('w') || this.isDown('arrowup'))    y += 1;
+    if (this.isDown('s') || this.isDown('arrowdown'))  y -= 1;
+    if (this.isDown('a') || this.isDown('arrowleft'))  x -= 1;
+    if (this.isDown('d') || this.isDown('arrowright')) x += 1;
+    if (x !== 0 || y !== 0) { const l = Math.hypot(x, y); x /= l; y /= l; }
+    return [x, y];
+  },
+};
+
+// ==========================================================================
+// SECTION 6 — Star Field
+// ==========================================================================
+const Stars = [];
+for (let i = 0; i < 300; i++) {
+  Stars.push({
+    x: (Math.random()-0.5) * 6000,
+    y: (Math.random()-0.5) * 6000,
+    s: 1 + Math.random() * 2.5,
+    b: 0.45 + Math.random() * 0.55,
+  });
+}
+
+// ==========================================================================
+// SECTION 7 — Entity Pool Pattern
+// ==========================================================================
+function createPool(max) {
+  const data = new Array(max);
+  return {
+    data, max, count: 0,
+
+    spawn(props) {
+      for (let i = 0; i < max; i++) {
+        if (!data[i] || !data[i].alive) {
+          if (!data[i]) data[i] = {};
+          const e = data[i];
+          Object.assign(e, {
+            id: i, x:0, y:0, vx:0, vy:0, angle:0,
+            radius: 10, alive: true, type: 'unknown',
+            ...props,
+          });
+          this.count++;
+          return e;
+        }
+      }
+      return null;
+    },
+
+    update(dt, cullDist) {
+      let alive = 0;
+      for (let i = 0; i < this.max; i++) {
+        const e = data[i];
+        if (!e || !e.alive) continue;
+        e.x += e.vx * dt;
+        e.y += e.vy * dt;
+        if (e.onUpdate) e.onUpdate(dt);
+        if (cullDist && V2.dist([e.x, e.y], [Camera.x, Camera.y]) > cullDist) {
+          e.alive = false;
+        } else {
+          alive++;
+        }
+      }
+      this.count = alive;
+    },
+
+    forEach(fn) {
+      for (let i = 0; i < this.max; i++) {
+        const e = data[i];
+        if (e && e.alive) fn(e, i);
+      }
+    },
+
+    cleanup() {
+      this.count = 0;
+      for (let i = 0; i < this.max; i++) {
+        if (data[i]) data[i].alive = false;
+      }
+    },
+  };
+}
+
+const BulletPool = createPool(500);
+const EnemyPool  = createPool(100);
+const PickupPool = createPool(30);
+
+// ==========================================================================
+// SECTION 8 — FX / Particles
+// ==========================================================================
+const FX = {
+  particles: [],
+  maxParticles: 400,
+  shakeAmount: 0,
+  shakeTime: 0,
+
+  burst(x, y, color, count, speed, lifetime, size) {
+    for (let i = 0; i < count && this.particles.length < this.maxParticles; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const spd   = speed * (0.5 + Math.random() * 0.5);
+      this.particles.push({
+        x, y,
+        vx: Math.cos(angle) * spd,
+        vy: Math.sin(angle) * spd,
+        life: lifetime * (0.5 + Math.random() * 0.5),
+        maxLife: lifetime,
+        r: color[0], g: color[1], b: color[2],
+        size: size || (1 + Math.random() * 2.5),
+      });
+    }
+  },
+
+  shake(amount, duration) {
+    this.shakeAmount = amount;
+    this.shakeTime = Math.max(this.shakeTime, duration);
+  },
+
+  update(dt) {
+    for (let i = this.particles.length - 1; i >= 0; i--) {
+      const p = this.particles[i];
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= 0.98;
+      p.vy *= 0.98;
+      p.life -= dt;
+      if (p.life <= 0) this.particles.splice(i, 1);
+    }
+    if (this.shakeTime > 0) {
+      this.shakeTime -= dt;
+      if (this.shakeTime <= 0) { this.shakeAmount = 0; this.shakeTime = 0; }
+    }
+  },
+
+  render() {
+    Draw.begin();
+    for (const p of this.particles) {
+      const alpha = Math.max(0, p.life / p.maxLife);
+      const s = p.size * (0.3 + alpha * 0.7);
+      Draw.circle(p.x, p.y, s, p.r * alpha, p.g * alpha, p.b * alpha, 5);
+    }
+    Draw.flush(canvas.width, canvas.height, Camera.x, Camera.y, Camera.zoom);
+  },
+
+  getShake() {
+    if (this.shakeTime <= 0) return [0, 0];
+    const intensity = this.shakeAmount * Math.min(1, this.shakeTime / 0.15);
+    return [(Math.random()-0.5)*intensity, (Math.random()-0.5)*intensity];
+  },
+
+  cleanup() {
+    this.particles = [];
+    this.shakeAmount = 0; this.shakeTime = 0;
+  },
+};
+
+// ==========================================================================
+// SECTION 9 — Obstacles (Asteroids)
+// ==========================================================================
+const Obstacles = {
+  list: [],
+
+  spawn(n) {
+    this.list = [];
+    for (let i = 0; i < n; i++) {
+      let x, y;
+      do {
+        x = (Math.random()-0.5) * 4000;
+        y = (Math.random()-0.5) * 4000;
+      } while (V2.dist([x,y],[0,0]) < 300); // avoid spawn zone
+
+      const segs = 8 + Math.floor(Math.random()*6);
+      const verts = [];
+      for (let j = 0; j < segs; j++) {
+        const a = (j/segs)*Math.PI*2;
+        const r = 0.65 + Math.random()*0.35;
+        verts.push([Math.cos(a)*r, Math.sin(a)*r]);
+      }
+
+      this.list.push({
+        x, y,
+        radius: 20 + Math.random()*30,
+        r: 0.3 + Math.random()*0.15,
+        g: 0.28 + Math.random()*0.12,
+        b: 0.32 + Math.random()*0.13,
+        rotation: Math.random()*Math.PI*2,
+        rotSpeed: (Math.random()-0.5)*0.4,
+        verts,
+      });
+    }
+  },
+
+  update(dt) {
+    for (const o of this.list) {
+      o.rotation += o.rotSpeed * dt;
+    }
+  },
+
+  render() {
+    Draw.begin();
+    for (const o of this.list) {
+      // Triangulate the polygon as a fan. Draw.triangle accepts exactly three
+      // vertices, so passing the complete polygon can join vertices from
+      // separate asteroids into screen-spanning triangles.
+      const scaled = o.verts.map(v => [v[0] * o.radius, v[1] * o.radius]);
+      for (let i = 0; i < scaled.length; i++) {
+        Draw.triangle(o.x, o.y,
+          [[0, 0], scaled[i], scaled[(i + 1) % scaled.length]],
+          o.rotation, o.r, o.g, o.b);
+      }
+    }
+    Draw.flush(canvas.width, canvas.height, Camera.x, Camera.y, Camera.zoom);
+  },
+};
+
+// ==========================================================================
+// SECTION 10 — Enemy
+// ==========================================================================
+const Enemy = {
+  _stats: {
+    basic: { radius:14, hp:1, speed:80,  r:1, g:0.25, b:0.25, score:10 },
+    fast:  { radius:10, hp:1, speed:150, r:0.9, g:0.55,b:0,   score:20 },
+    tank:  { radius:20, hp:3, speed:50,  r:0.55,g:0.1, b:0.1, score:30 },
+  },
+
+  spawn(x, y, type) {
+    const s = this._stats[type] || this._stats.basic;
+    return EnemyPool.spawn({
+      type: 'enemy', enemyType: type,
+      x, y, vx:0, vy:0, angle:0,
+      radius: s.radius,
+      hp: s.hp, maxHp: s.hp,
+      speed: s.speed,
+      r: s.r, g: s.g, b: s.b,
+      score: s.score,
+    });
+  },
+
+  update(dt) {
+    EnemyPool.forEach(e => {
+      const [dx, dy] = V2.norm([Player.x-e.x, Player.y-e.y]);
+      e.vx = dx * e.speed;
+      e.vy = dy * e.speed;
+      e.angle = Math.atan2(dy, dx);
+    });
+    // Apply velocity to position + cull off-screen enemies
+    EnemyPool.update(dt, 900);
+  },
+
+  render() {
+    EnemyPool.forEach(e => {
+      Draw.circle(e.x, e.y, e.radius, e.r, e.g, e.b, 10);
+      // Inner glow
+      Draw.circle(e.x, e.y, e.radius*0.5, e.r*0.6, e.g*0.6, e.b*0.6, 8);
+      // HP bar for multi-hp enemies
+      if (e.maxHp > 1) {
+        const barW = e.radius*2, barH = 3;
+        const barY = e.y - e.radius - 10;
+        Draw.rect(e.x, barY+barH/2, barW, barH, 0, 0.3, 0.3);
+        Draw.rect(e.x, barY+barH/2, barW*(e.hp/e.maxHp), barH, 0, 1, 0);
+      }
+    });
+    Draw.flush(canvas.width, canvas.height, Camera.x, Camera.y, Camera.zoom);
+  },
+};
+
+// ==========================================================================
+// SECTION 11 — Level / Waves
+// ==========================================================================
+const Level = {
+  wave: 0,
+  waveTimer: 0,
+  spawnQueue: [],
+
+  spawnWave() {
+    this.wave++;
+    const count = 3 + this.wave * 2;
+    const patterns = ['circle', 'line', 'scatter'];
+    const pattern  = patterns[Math.floor(Math.random()*patterns.length)];
+    const types    = ['basic','basic','fast','tank'];
+    const type     = types[Math.floor(Math.random()*types.length)];
+    const edgeDist = 500 + Camera.zoom < 1 ? 200 : 0;
+
+    this.spawnQueue = [];
+    for (let i = 0; i < count; i++) {
+      let x, y;
+      const a = Math.random()*Math.PI*2;
+      switch (pattern) {
+        case 'circle':
+          x = Player.x + Math.cos(a + i*Math.PI*2/count) * (500+edgeDist);
+          y = Player.y + Math.sin(a + i*Math.PI*2/count) * (500+edgeDist);
+          break;
+        case 'line':
+          x = Player.x + (i/count-0.5)*500;
+          y = Player.y + 500 + edgeDist;
+          break;
+        case 'scatter':
+        default:
+          x = Player.x + (Math.random()-0.5)*700;
+          y = Player.y + (Math.random()-0.5)*700;
+          break;
+      }
+      this.spawnQueue.push({ x, y, type, delay: i * 0.25 });
+    }
+    this.waveTimer = 0;
+  },
+
+  update(dt) {
+    this.waveTimer += dt;
+    while (this.spawnQueue.length > 0 && this.spawnQueue[0].delay <= this.waveTimer) {
+      const s = this.spawnQueue.shift();
+      Enemy.spawn(s.x, s.y, s.type);
+    }
+    // next wave when queue empty and delay passed
+    if (this.spawnQueue.length === 0 && this.waveTimer > 3) {
+      this.spawnWave();
+    }
+  },
+
+  reset() {
+    this.wave = 0; this.waveTimer = -2; this.spawnQueue = [];
+  },
+};
+
+// ==========================================================================
+// SECTION 12 — UpgradePool (Phase 2: minimal but extensible)
+// ==========================================================================
+const UpgradePool = {
+  multishot: {
+    name: 'Multishot',
+    apply(player) { player.multishot = (player.multishot||0) + 1; },
+  },
+  rapidfire: {
+    name: 'Rapid Fire',
+    apply(player) { player.rapidFireLevel = (player.rapidFireLevel||0) + 1; },
+  },
+  damage_amp: {
+    name: 'Damage Amp',
+    apply(player) { player.damageLevel = (player.damageLevel||0) + 1; },
+  },
+  curved_bullets: {
+    name: 'Curved Bullets',
+    apply(player) { /* no player-side effect */ },
+    bulletMod(base) {
+      return { ...base, curved: true, curvature: 1.8 + base.damage * 0.15 };
+    },
+    onBulletTick(bullet, dt) {
+      if (bullet.curved) {
+        const speed = V2.len([bullet.vx, bullet.vy]) || bullet.speed;
+        if (speed === 0) return;
+        const [nx, ny] = V2.norm([bullet.vx, bullet.vy]);
+        // Perpendicular (left-turn) direction
+        const px = -ny, py = nx;
+        const curveAmount = bullet.curvature * dt;
+        bullet.vx += px * curveAmount;
+        bullet.vy += py * curveAmount;
+        // Renormalize to keep speed constant
+        const newSpeed = V2.len([bullet.vx, bullet.vy]);
+        if (newSpeed > 0) {
+          bullet.vx = bullet.vx / newSpeed * speed;
+          bullet.vy = bullet.vy / newSpeed * speed;
+        }
+        bullet.angle = Math.atan2(bullet.vy, bullet.vx);
+      }
+    },
+  },
+};
+
+const AVAILABLE_UPGRADES = ['multishot','rapidfire','damage_amp','curved_bullets'];
+
+// ==========================================================================
+// SECTION 13 — Player  (EXTENDED: health, shooting, upgrades)
+// ==========================================================================
+const Player = {
+  x: 0, y: 0,
+  vx: 0, vy: 0,
+  angle: 0,
+  accel: 600,
+  friction: 0.92,
+  radius: 12,
+
+  // Phase 2 additions
+  health: 10, maxHealth: 10,
+  shootCooldown: 0.2, shootTimer: 0,
+  score: 0,
+  multishot: 0,
+  rapidFireLevel: 0,
+  damageLevel: 0,
+  invincible: 0,
+  alive: true,
+
+  init() {
+    this.x = 0; this.y = 0;
+    this.vx = 0; this.vy = 0;
+    this.health = this.maxHealth = 10;
+    this.shootTimer = 0; this.score = 0;
+    this.multishot = 0; this.rapidFireLevel = 0; this.damageLevel = 0;
+    this.invincible = 2.0; this.alive = true;
+    this.upgrades = []; // composable upgrade list
+  },
+
+  shoot() {
+    if (this.shootTimer > 0) return;
+    const cooldown = this.shootCooldown / (1 + this.rapidFireLevel * 0.35);
+    this.shootTimer = cooldown;
+
+    const count = 1 + this.multishot;
+    const spread = 0.12;
+
+    for (let i = 0; i < count; i++) {
+      const a = this.angle + (i - (count-1)/2) * spread;
+      const speed = 650 + this.damageLevel * 30;
+      const bx = this.x + Math.cos(a) * 16;
+      const by = this.y + Math.sin(a) * 16;
+
+      // Build base bullet spec
+      let bullet = {
+        type: 'bullet',
+        x: bx, y: by,
+        vx: Math.cos(a)*speed,
+        vy: Math.sin(a)*speed,
+        angle: a,
+        radius: 4,
+        damage: 1 + this.damageLevel,
+        speed: speed,
+        r: 1, g: 1, b: 0.3,
+      };
+
+      // Apply composable upgrade bulletMod hooks
+      for (const up of this.upgrades) {
+        if (up.bulletMod) bullet = up.bulletMod(bullet);
+      }
+
+      BulletPool.spawn(bullet);
+    }
+  },
+
+  update(dt) {
+    const [dx, dy] = Input.getDir();
+    this.vx += dx * this.accel * dt;
+    this.vy += dy * this.accel * dt;
+    this.vx *= Math.pow(this.friction, dt * 60);
+    this.vy *= Math.pow(this.friction, dt * 60);
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+
+    this.shootTimer -= dt;
+    if (Input.isShooting() && this.alive) this.shoot();
+
+    if (this.invincible > 0) this.invincible -= dt;
+  },
+
+  aimAtMouse() {
+    const r = canvas.getBoundingClientRect();
+    const mouseX = Input.mouse.x * (canvas.width / r.width);
+    const mouseY = Input.mouse.y * (canvas.height / r.height);
+    const [px, py] = Camera.worldToScreen(this.x, this.y);
+    this.angle = -Math.atan2(mouseY - py, mouseX - px);
+  },
+
+  takeDamage(amount) {
+    if (this.invincible > 0 || !this.alive) return;
+    this.health -= amount;
+    this.invincible = 1.0;
+    FX.shake(6, 0.25);
+    FX.burst(this.x, this.y, [0, 1, 0], 12, 120, 0.5, 2);
+    if (this.health <= 0) {
+      this.health = 0;
+      this.alive = false;
+      FX.burst(this.x, this.y, [0, 1, 0], 30, 200, 0.8, 3);
+      FX.burst(this.x, this.y, [1, 1, 0], 20, 150, 0.6, 2);
+      Game.state = 'GAME_OVER';
+      document.getElementById('goScore').textContent =
+        `Score: ${this.score} | Wave: ${Level.wave}`;
+      document.getElementById('gameOver').style.display = 'flex';
+    }
+  },
+
+  render() {
+    if (!this.alive) return;
+    // Blink when invincible
+    if (this.invincible > 0 && Math.floor(this.invincible * 12) % 2 === 0) return;
+
+    // Ship body
+    Draw.triangle(this.x, this.y,
+      [[-12,-9],[-12,9],[14,0]], this.angle, 0, 1, 0);
+    // Nose
+    Draw.rect(
+      this.x + Math.cos(this.angle)*9,
+      this.y + Math.sin(this.angle)*9,
+      4, 4, this.angle, 1, 1, 0);
+    // Engine glow
+    const thrust = Input.getDir();
+    const tMag = Math.hypot(thrust[0], thrust[1]);
+    if (tMag > 0.1) {
+      const ex = this.x - Math.cos(this.angle)*12;
+      const ey = this.y - Math.sin(this.angle)*12;
+      Draw.circle(ex, ey, 4 + tMag*2, 1, 0.4, 0, 5);
+    }
+  },
+};
+
+// ==========================================================================
+// SECTION 14 — UI / HUD
+// ==========================================================================
+const UI = {
+  update() {
+    // Health bar
+    const pct = Math.max(0, Player.health / Player.maxHealth) * 100;
+    document.getElementById('healthInner').style.width = pct + '%';
+
+    // Score
+    document.getElementById('scoreDisplay').textContent = `Score: ${Player.score}`;
+
+    // Wave
+    document.getElementById('waveDisplay').textContent = `Wave ${Level.wave}`;
+
+    // Upgrades — count levels per upgrade type
+    const counts = {};
+    for (const up of Player.upgrades) {
+      counts[up.name] = (counts[up.name] || 0) + 1;
+    }
+    const tags = [];
+    if (counts['Multishot'])        tags.push(`🔱×${counts['Multishot']}`);
+    if (counts['Rapid Fire'])       tags.push(`⚡×${counts['Rapid Fire']}`);
+    if (counts['Damage Amp'])       tags.push(`💥×${counts['Damage Amp']}`);
+    if (counts['Curved Bullets'])   tags.push(`〰️×${counts['Curved Bullets']}`);
+    document.getElementById('upgradeDisplay').textContent = tags.join('  ');
+  },
+};
+
+// ==========================================================================
+// SECTION 15 — Game Loop (EXTENDED: states, collision, new entities)
+// ==========================================================================
+const Game = {
+  state: 'PLAYING',
+  last: 0, fc: 0, fpsT: 0, fps: 0,
+
+  init() {
+    Input.init();
+    Camera.init(0, 0, 1);
+    Camera.follow(Player);
+    Player.init();
+    Obstacles.spawn(15);
+    Level.reset();
+    BulletPool.cleanup();
+    EnemyPool.cleanup();
+    PickupPool.cleanup();
+    FX.cleanup();
+
+    document.getElementById('gameOver').style.display = 'none';
+    UI.update();
+
+    requestAnimationFrame(t => this.loop(t));
+  },
+
+  reset() {
+    Player.init();
+    Obstacles.spawn(15);
+    Level.reset();
+    BulletPool.cleanup();
+    EnemyPool.cleanup();
+    PickupPool.cleanup();
+    FX.cleanup();
+    this.state = 'PLAYING';
+    document.getElementById('gameOver').style.display = 'none';
+    UI.update();
+  },
+
+  loop(ts) {
+    const dt = Math.min((ts - this.last) / 1000, 0.05);
+    this.last = ts;
+
+    /* ── FPS counter ── */
+    this.fpsT += dt; this.fc++;
+    if (this.fpsT >= 1) {
+      this.fps = Math.round(this.fc / this.fpsT);
+      this.fc = 0; this.fpsT = 0;
+    }
+
+    if (this.state === 'PLAYING') {
+      /* ── Update ── */
+      Input.tick();
+      Player.update(dt);
+      Player.aimAtMouse();
+      Camera.update(dt);
+      Input.updateWorld();
+
+      Level.update(dt);
+      Enemy.update(dt);
+      /* ── Bullet update (with composable upgrade onBulletTick) ── */
+      BulletPool.update(dt, 900);
+      if (Player.upgrades && Player.upgrades.length > 0) {
+        BulletPool.forEach(b => {
+          if (!b.alive) return;
+          for (const up of Player.upgrades) {
+            if (up.onBulletTick) up.onBulletTick(b, dt);
+          }
+        });
+      }
+      Obstacles.update(dt);
+      FX.update(dt);
+
+      /* ── Collision: Bullet ↔ Enemy ── */
+      BulletPool.forEach(b => {
+        if (!b.alive) return;
+        EnemyPool.forEach(e => {
+          if (!e.alive) return;
+          if (V2.dist([b.x,b.y],[e.x,e.y]) < b.radius + e.radius) {
+            e.hp -= b.damage;
+            b.alive = false;
+            FX.burst(b.x, b.y, [1,1,0.3], 5, 80, 0.3, 1);
+            if (e.hp <= 0) {
+              e.alive = false;
+              Player.score += e.score;
+              FX.burst(e.x, e.y, [e.r*255|0, e.g*255|0, e.b*255|0], 18, 140, 0.6, 2.5);
+              FX.shake(3, 0.12);
+
+              // Pickup drop (30% chance)
+              if (Math.random() < 0.3) {
+                const type = Math.random() < 0.4 ? 'health' : 'upgrade';
+                PickupPool.spawn({
+                  type: 'pickup', pickupType: type,
+                  x: e.x, y: e.y,
+                  vx: (Math.random()-0.5)*40, vy: (Math.random()-0.5)*40,
+                  radius: 8, alive: true,
+                  magnetRange: 120, magnetSpeed: 180,
+                  pulsePhase: Math.random()*Math.PI*2,
+                });
+              }
+            }
+          }
+        });
+      });
+
+      /* ── Collision: Bullet ↔ Obstacle ── */
+      BulletPool.forEach(b => {
+        if (!b.alive) return;
+        for (const o of Obstacles.list) {
+          if (V2.dist([b.x,b.y],[o.x,o.y]) < b.radius + o.radius) {
+            b.alive = false;
+            FX.burst(b.x, b.y, [0.8,0.8,0.8], 3, 50, 0.2, 1);
+            break;
+          }
+        }
+      });
+
+      /* ── Collision: Ship ↔ Obstacle ── */
+      for (const o of Obstacles.list) {
+        const dist = V2.dist([Player.x,Player.y],[o.x,o.y]);
+        if (dist < Player.radius + o.radius) {
+          const [dx,dy] = V2.norm([Player.x-o.x, Player.y-o.y]);
+          const overlap = Player.radius + o.radius - dist;
+          Player.x += dx*overlap;
+          Player.y += dy*overlap;
+          Player.vx *= -0.5;
+          Player.vy *= -0.5;
+          Player.takeDamage(1);
+        }
+      }
+
+      /* ── Collision: Ship ↔ Enemy ── */
+      EnemyPool.forEach(e => {
+        if (!e.alive) return;
+        const dist = V2.dist([Player.x,Player.y],[e.x,e.y]);
+        if (dist < Player.radius + e.radius) {
+          const [dx,dy] = V2.norm([Player.x-e.x, Player.y-e.y]);
+          const overlap = Player.radius + e.radius - dist;
+          Player.x += dx*overlap*2;
+          Player.y += dy*overlap*2;
+          Player.vx = dx*250;
+          Player.vy = dy*250;
+          Player.takeDamage(2);
+        }
+      });
+
+      /* ── Collision: Ship ↔ Pickup ── */
+      PickupPool.forEach(p => {
+        if (!p.alive) return;
+        const dist = V2.dist([Player.x,Player.y],[p.x,p.y]);
+
+        // Magnet
+        if (dist < p.magnetRange) {
+          const [dx,dy] = V2.norm([Player.x-p.x, Player.y-p.y]);
+          p.vx += dx * p.magnetSpeed * dt;
+          p.vy += dy * p.magnetSpeed * dt;
+        }
+        p.vx *= 0.95; p.vy *= 0.95;
+        p.pulsePhase += dt * 4;
+
+        // Collect
+        if (dist < Player.radius + p.radius) {
+          p.alive = false;
+          const col = p.pickupType === 'health' ? [0,1,0] : [1,0.8,0];
+          FX.burst(p.x, p.y, col, 10, 80, 0.4, 2);
+          if (p.pickupType === 'health') {
+            Player.health = Math.min(Player.maxHealth, Player.health + 3);
+          } else {
+            const name = AVAILABLE_UPGRADES[Math.floor(Math.random()*AVAILABLE_UPGRADES.length)];
+            const up = UpgradePool[name];
+            up.apply(Player);
+            Player.upgrades.push(up);
+          }
+        }
+      });
+
+      // ── Pickup movement ──
+      PickupPool.forEach(p => {
+        if (p.alive) {
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          // Cull far pickups
+          if (V2.dist([p.x,p.y],[Camera.x,Camera.y]) > 900) p.alive = false;
+        }
+      });
+
+      /* ── Render ── */
+      const vw = canvas.width, vh = canvas.height;
+      const [sx, sy] = FX.getShake();
+
+      gl.clearColor(0.02, 0.02, 0.06, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      // 1) Stars
+      Draw.begin();
+      for (const st of Stars) {
+        Draw.circle(st.x*0.2+sx*0.1, st.y*0.2+sy*0.1,
+          st.s, st.b*0.8, st.b*0.8, st.b*0.8, 6);
+      }
+      Draw.flush(vw, vh, Camera.x, Camera.y, Camera.zoom);
+
+      // 2) Obstacles
+      Draw.begin();
+      for (const o of Obstacles.list) {
+        const sc = o.verts.map(v => [v[0]*o.radius, v[1]*o.radius]);
+        for (let i = 0; i < sc.length; i++) {
+          Draw.triangle(o.x + sx, o.y + sy,
+            [[0, 0], sc[i], sc[(i + 1) % sc.length]],
+            o.rotation, o.r, o.g, o.b);
+        }
+      }
+      Draw.flush(vw, vh, Camera.x, Camera.y, Camera.zoom);
+
+      // 3) Particles
+      FX.render();
+
+      // 4) Pickups
+      Draw.begin();
+      PickupPool.forEach(p => {
+        if (!p.alive) return;
+        const pulse = 1 + Math.sin(p.pulsePhase)*0.2;
+        const r = p.radius * pulse;
+        if (p.pickupType === 'health') {
+          Draw.circle(p.x, p.y, r, 0, 1, 0, 10);
+          Draw.rect(p.x-1, p.y-3, 2, 6, 0, 0, 0, 0);
+          Draw.rect(p.x-3, p.y-1, 6, 2, 0, 0, 0, 0);
+        } else {
+          Draw.circle(p.x, p.y, r, 1, 0.8, 0, 10);
+          Draw.circle(p.x, p.y, r*0.6, 1, 1, 0.5, 8);
+        }
+      });
+      Draw.flush(vw, vh, Camera.x, Camera.y, Camera.zoom);
+
+      // 5) Enemies
+      Enemy.render();
+
+      // 6) Bullets
+      Draw.begin();
+      BulletPool.forEach(b => {
+        if (!b.alive) return;
+        Draw.circle(b.x+sx, b.y+sy, b.radius, b.r, b.g, b.b, 8);
+        // Glow
+        Draw.circle(b.x+sx, b.y+sy, b.radius*2, b.r*0.3, b.g*0.3, b.b*0.3, 6);
+      });
+      Draw.flush(vw, vh, Camera.x, Camera.y, Camera.zoom);
+
+      // 7) Player
+      Draw.begin();
+      Player.render();
+      Draw.flush(vw, vh, Camera.x, Camera.y, Camera.zoom);
+
+      /* ── Touch joystick visual ── */
+      if (Input.isTouchDevice && Input.touch.active) {
+        const cx = Input.touch.joystickBaseX;
+        const cy = Input.touch.joystickBaseY;
+        // Base circle
+        Draw.begin();
+        Draw.circle(cx, cy, 50, 0.2, 0.2, 0.2, 12);
+        Draw.circle(cx, cy, 50, 0.15, 0.15, 0.15, 12);
+        // Knob
+        const kx = cx + Input.touch.joyX * 50;
+        const ky = cy + Input.touch.joyY * 50;
+        Draw.circle(kx, ky, 18, 0.3, 0.3, 0.3, 10);
+        Draw.flush(vw, vh, Camera.x, Camera.y, Camera.zoom);
+      }
+
+      UI.update();
+    }
+
+    /* ── Status text ── */
+    if (this.fps % 10 === 0) {
+      document.getElementById('info').textContent =
+        `FPS: ${this.fps} | Pos: (${Player.x.toFixed(0)},${Player.y.toFixed(0)})`;
+    }
+
+    requestAnimationFrame(t => this.loop(t));
+  },
+};
+
+Game.init();
+</script>
+</body>
+</html>

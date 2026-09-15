@@ -1,0 +1,1722 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Space Shooter</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #000;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  canvas {
+    display: block;
+    width: 100%; height: 100%;
+  }
+  #ui-overlay {
+    position: fixed; top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    z-index: 10;
+  }
+  #hp-bar-container {
+    position: fixed;
+    top: 12px; left: 12px;
+    width: 200px; height: 20px;
+    background: rgba(0,0,0,0.6);
+    border: 2px solid rgba(255,255,255,0.3);
+    border-radius: 4px;
+    z-index: 10;
+  }
+  #hp-bar {
+    height: 100%;
+    width: 100%;
+    background: linear-gradient(90deg, #ff3333, #ff6666);
+    border-radius: 2px;
+    transition: width 0.2s;
+  }
+  #hp-text {
+    position: fixed; top: 16px; left: 220px;
+    color: #fff; font: bold 14px monospace;
+    z-index: 10;
+    text-shadow: 0 0 4px #000;
+  }
+  #score-display {
+    position: fixed; top: 12px; right: 12px;
+    color: #fff; font: bold 18px monospace;
+    z-index: 10;
+    text-shadow: 0 0 4px #000;
+  }
+  #weapon-display {
+    position: fixed; top: 36px; right: 12px;
+    color: #aaa; font: 13px monospace;
+    z-index: 10;
+    text-shadow: 0 0 4px #000;
+  }
+  #touch-joystick {
+    display: none;
+    position: fixed;
+    bottom: 20px; left: 20px;
+    width: 120px; height: 120px;
+    z-index: 20;
+  }
+  #touch-joystick-base {
+    width: 120px; height: 120px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.1);
+    border: 2px solid rgba(255,255,255,0.2);
+    position: relative;
+  }
+  #touch-joystick-knob {
+    width: 48px; height: 48px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.3);
+    border: 2px solid rgba(255,255,255,0.4);
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+  }
+  #touch-aim-zone {
+    display: none;
+    position: fixed;
+    bottom: 20px; right: 20px;
+    width: 140px; height: 140px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.05);
+    border: 2px solid rgba(255,255,255,0.15);
+    z-index: 20;
+  }
+  #touch-aim-crosshair {
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.3);
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+  }
+  #instructions {
+    position: fixed; bottom: 12px; left: 50%;
+    transform: translateX(-50%);
+    color: rgba(255,255,255,0.4);
+    font: 12px monospace;
+    z-index: 10;
+    text-align: center;
+    text-shadow: 0 0 4px #000;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="gameCanvas"></canvas>
+
+<div id="hp-bar-container"><div id="hp-bar"></div></div>
+<div id="hp-text">100 / 100</div>
+<div id="score-display">Score: 0</div>
+<div id="weapon-display">Laser</div>
+<div id="instructions">WASD to move · Click to shoot · Mouse to aim</div>
+
+<!-- Touch controls (shown on mobile) -->
+<div id="touch-joystick">
+  <div id="touch-joystick-base">
+    <div id="touch-joystick-knob"></div>
+  </div>
+</div>
+<div id="touch-aim-zone">
+  <div id="touch-aim-crosshair"></div>
+</div>
+
+<script>
+// ============================================================
+// space_shooter.html  —  Steps 1, 2 & 3 Implementation
+//   Step 1: Game Loop, Input, Camera, Player Ship
+//   Step 2: Projectile System & Firing
+//   Step 3: Enemies, Spawning & AI
+// ============================================================
+
+(function() {
+'use strict';
+
+// ============================================================
+// CONSTANTS
+// ============================================================
+const CONSTANTS = {
+  WORLD_WIDTH: 2000,
+  WORLD_HEIGHT: 2000,
+  PLAYER_RADIUS: 16,
+  PLAYER_MAX_HP: 100,
+  PLAYER_ACCEL: 600,
+  PLAYER_FRICTION: 2.0,
+  PLAYER_MAX_SPEED: 320,
+  PLAYER_TURN_SPEED: 8,
+
+  BULLET_RADIUS: 4,
+  BULLET_SPEED: 500,
+  BULLET_DAMAGE: 10,
+  BULLET_LIFETIME: 2.0,
+  FIRE_COOLDOWN: 0.15,
+
+  POOL_INITIAL: 64,
+  POOL_MAX: 256,
+
+  CAMERA_SMOOTHING: 5.0,
+  CAMERA_MARGIN: 80,
+
+  // Enemy types
+  ENEMY_CHASER_RADIUS: 14,
+  ENEMY_CHASER_HP: 20,
+  ENEMY_CHASER_SPEED: 120,
+  ENEMY_CHASER_DAMAGE: 10,
+  ENEMY_SHOOTER_RADIUS: 16,
+  ENEMY_SHOOTER_HP: 30,
+  ENEMY_SHOOTER_SPEED: 80,
+  ENEMY_SHOOTER_DAMAGE: 8,
+  ENEMY_SHOOTER_FIRE_RATE: 2.0,
+
+  // Spawning
+  SPAWN_MARGIN: 100,
+  WAVE_INITIAL_ENEMIES: 5,
+  WAVE_ENEMIES_INCREMENT: 3,
+  WAVE_TIMER_INITIAL: 8.0,
+  WAVE_TIMER_DECREASE: 0.5,
+  WAVE_TIMER_MIN: 3.0,
+};
+
+// ============================================================
+// MATH UTILITIES (vec2)
+// ============================================================
+const Math2 = {
+  lerp(a, b, t) { return a + (b - a) * t; },
+  clamp(v, min, max) { return Math.max(min, Math.min(max, v)); },
+  dist(x1, y1, x2, y2) { return Math.hypot(x2 - x1, y2 - y1); },
+  normalize(x, y) {
+    const len = Math.hypot(x, y);
+    if (len === 0) return { x: 0, y: 0 };
+    return { x: x / len, y: y / len };
+  },
+  angle(x, y) { return Math.atan2(y, x); },
+  rand(min, max) { return min + Math.random() * (max - min); },
+  randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; },
+};
+
+// ============================================================
+// OBJECT POOL
+// ============================================================
+class ObjectPool {
+  constructor(createFn, initialSize = 32) {
+    this.createFn = createFn;
+    this.available = [];
+    this.inUse = new Set();
+    for (let i = 0; i < initialSize; i++) {
+      this.available.push(createFn());
+    }
+  }
+
+  acquire() {
+    let obj;
+    if (this.available.length > 0) {
+      obj = this.available.pop();
+    } else {
+      obj = this.createFn();
+    }
+    this.inUse.add(obj);
+    return obj;
+  }
+
+  release(obj) {
+    if (this.inUse.has(obj)) {
+      this.inUse.delete(obj);
+      this.available.push(obj);
+    }
+  }
+
+  releaseAll() {
+    for (const obj of this.inUse) {
+      this.available.push(obj);
+    }
+    this.inUse.clear();
+  }
+
+  size() { return this.inUse.size; }
+}
+
+// ============================================================
+// INPUT MANAGER
+// ============================================================
+class InputManager {
+  constructor(canvas) {
+    this.keys = {};
+    this.mouse = { x: 0, y: 0, down: false, worldX: 0, worldY: 0 };
+    this.touchMove = { x: 0, y: 0, active: false };
+    this.touchAim = { x: 0, y: 0, active: false };
+    this.touchFire = { down: false };
+    this.isMobile = false;
+    this.canvas = canvas;
+    this._setupKeyboard();
+    this._setupMouse();
+    this._setupTouch();
+    this._detectMobile();
+  }
+
+  _detectMobile() {
+    this.isMobile = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+    if (this.isMobile) {
+      document.getElementById('touch-joystick').style.display = 'block';
+      document.getElementById('touch-aim-zone').style.display = 'block';
+      document.getElementById('instructions').textContent =
+        'Left joystick: move · Right zone: aim & auto-fire';
+    }
+  }
+
+  _setupKeyboard() {
+    window.addEventListener('keydown', (e) => {
+      this.keys[e.code] = true;
+      // Prevent scrolling for game keys
+      if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) {
+        e.preventDefault();
+      }
+    });
+    window.addEventListener('keyup', (e) => {
+      this.keys[e.code] = false;
+    });
+  }
+
+  _setupMouse() {
+    const canvas = this.canvas;
+    canvas.addEventListener('mousemove', (e) => {
+      this.mouse.x = e.clientX;
+      this.mouse.y = e.clientY;
+    });
+    canvas.addEventListener('mousedown', (e) => {
+      this.mouse.down = true;
+      e.preventDefault();
+    });
+    canvas.addEventListener('mouseup', (e) => {
+      this.mouse.down = false;
+    });
+    canvas.addEventListener('mouseleave', () => {
+      this.mouse.down = false;
+    });
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  }
+
+  _setupTouch() {
+    const canvas = this.canvas;
+    const joystickBase = document.getElementById('touch-joystick-base');
+    const joystickKnob = document.getElementById('touch-joystick-knob');
+    const aimZone = document.getElementById('touch-aim-zone');
+    const aimCrosshair = document.getElementById('touch-aim-crosshair');
+
+    let joystickTouch = null;
+    let aimTouch = null;
+    const joystickCenter = { x: 60, y: 60 };
+    const joystickRadius = 48;
+
+    canvas.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      for (const touch of e.changedTouches) {
+        const tx = touch.clientX;
+        const ty = touch.clientY;
+        // Determine if in joystick zone (left side, bottom) or aim zone (right side, bottom)
+        if (tx < window.innerWidth * 0.5 && ty > window.innerHeight * 0.5) {
+          joystickTouch = touch.identifier;
+          this.touchMove.active = true;
+          this.touchMove.x = 0;
+          this.touchMove.y = 0;
+        } else if (tx >= window.innerWidth * 0.5 && ty > window.innerHeight * 0.3) {
+          aimTouch = touch.identifier;
+          this.touchAim.active = true;
+          // Set aim to touch position within zone
+          const zoneRect = aimZone.getBoundingClientRect();
+          this.touchAim.x = tx - zoneRect.left - 70;
+          this.touchAim.y = ty - zoneRect.top - 70;
+          this.touchFire.down = true;
+        } else {
+          // Any other touch = fire
+          this.touchFire.down = true;
+          this.mouse.down = true;
+        }
+      }
+    }, { passive: false });
+
+    canvas.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+      for (const touch of e.changedTouches) {
+        const tx = touch.clientX;
+        const ty = touch.clientY;
+
+        if (touch.identifier === joystickTouch) {
+          let dx = tx - joystickCenter.x;
+          let dy = ty - joystickCenter.y;
+          // Adjust center to where touch started on joystick
+          const baseRect = joystickBase.getBoundingClientRect();
+          joystickCenter.x = baseRect.left + 60;
+          joystickCenter.y = baseRect.top + 60;
+          dx = tx - joystickCenter.x;
+          dy = ty - joystickCenter.y;
+          const dist = Math.hypot(dx, dy);
+          const clamped = Math.min(dist, joystickRadius);
+          const angle = Math.atan2(dy, dx);
+          const nx = Math.cos(angle) * clamped;
+          const ny = Math.sin(angle) * clamped;
+          joystickKnob.style.transform = `translate(calc(-50% + ${nx}px), calc(-50% + ${ny}px))`;
+          this.touchMove.x = nx / joystickRadius;
+          this.touchMove.y = ny / joystickRadius;
+        }
+
+        if (touch.identifier === aimTouch) {
+          const zoneRect = aimZone.getBoundingClientRect();
+          this.touchAim.x = tx - zoneRect.left - 70;
+          this.touchAim.y = ty - zoneRect.top - 70;
+          const aimDist = Math.hypot(this.touchAim.x, this.touchAim.y);
+          const clamped = Math.min(aimDist, 56);
+          const angle = Math.atan2(this.touchAim.y, this.touchAim.x);
+          const cx = Math.cos(angle) * clamped;
+          const cy = Math.sin(angle) * clamped;
+          aimCrosshair.style.transform = `translate(calc(-50% + ${cx}px), calc(-50% + ${cy}px))`;
+          this.touchAim.x = cx;
+          this.touchAim.y = cy;
+        }
+      }
+    }, { passive: false });
+
+    canvas.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      for (const touch of e.changedTouches) {
+        if (touch.identifier === joystickTouch) {
+          joystickTouch = null;
+          this.touchMove.active = false;
+          this.touchMove.x = 0;
+          this.touchMove.y = 0;
+          joystickKnob.style.transform = 'translate(-50%, -50%)';
+        }
+        if (touch.identifier === aimTouch) {
+          aimTouch = null;
+          this.touchAim.active = false;
+          this.touchFire.down = false;
+          aimCrosshair.style.transform = 'translate(-50%, -50%)';
+        }
+        // Check if any fire touch remains
+        let fireActive = false;
+        for (const t of e.touches) {
+          if (t.identifier !== joystickTouch && t.identifier !== aimTouch) fireActive = true;
+        }
+        if (!fireActive) {
+          this.touchFire.down = false;
+          this.mouse.down = false;
+        }
+      }
+    }, { passive: false });
+  }
+
+  /** Get movement vector from WASD or touch joystick */
+  getMovement() {
+    let x = 0, y = 0;
+    if (this.keys['KeyW'] || this.keys['ArrowUp']) y -= 1;
+    if (this.keys['KeyS'] || this.keys['ArrowDown']) y += 1;
+    if (this.keys['KeyA'] || this.keys['ArrowLeft']) x -= 1;
+    if (this.keys['KeyD'] || this.keys['ArrowRight']) x += 1;
+    // Normalize to prevent fast diagonal movement
+    if (x !== 0 && y !== 0) {
+      const n = Math2.normalize(x, y);
+      x = n.x;
+      y = n.y;
+    }
+
+    // Touch joystick overrides
+    if (this.touchMove.active) {
+      x = this.touchMove.x;
+      y = this.touchMove.y;
+    }
+
+    if (x !== 0 || y !== 0) {
+      const n = Math2.normalize(x, y);
+      return { x: n.x, y: n.y };
+    }
+    return { x: 0, y: 0 };
+  }
+
+  /** Get aim direction (toward mouse or touch aim zone) */
+  getAimDirection(camera) {
+    if (this.isMobile && this.touchAim.active) {
+      const n = Math2.normalize(this.touchAim.x, this.touchAim.y);
+      return { x: n.x, y: n.y, angle: Math.atan2(this.touchAim.y, this.touchAim.x) };
+    }
+    const worldPos = camera.screenToWorld(this.mouse.x, this.mouse.y);
+    const dx = worldPos.x - this._lastPlayerX;
+    const dy = worldPos.y - this._lastPlayerY;
+    const n = Math2.normalize(dx, dy);
+    return { x: n.x, y: n.y, angle: Math.atan2(dy, dx) };
+  }
+
+  updatePlayerPos(x, y) {
+    this._lastPlayerX = x;
+    this._lastPlayerY = y;
+    // Sync mouse world position
+    this.mouse.worldX = x;
+    this.mouse.worldY = y;
+  }
+
+  screenToWorld(sx, sy) {
+    // Will be set by Game from camera transform
+    if (this._worldMatrix) {
+      // Inverse transform
+      const m = this._worldMatrix;
+      const cx = m[0] * sx + m[2] * sy + m[4];
+      const cy = m[1] * sx + m[3] * sy + m[5];
+      return { x: cx, y: cy };
+    }
+    return { x: sx, y: sy };
+  }
+
+  isFiring() {
+    return this.mouse.down || this.touchFire.down;
+  }
+
+  getCrosshairScreenPos() {
+    if (this.isMobile && this.touchAim.active) {
+      const zone = document.getElementById('touch-aim-zone').getBoundingClientRect();
+      return {
+        x: zone.left + 70 + this.touchAim.x,
+        y: zone.top + 70 + this.touchAim.y
+      };
+    }
+    return { x: this.mouse.x, y: this.mouse.y };
+  }
+}
+
+// ============================================================
+// CAMERA
+// ============================================================
+class Camera {
+  constructor(worldWidth, worldHeight) {
+    this.x = 0;
+    this.y = 0;
+    this.targetX = 0;
+    this.targetY = 0;
+    this.worldWidth = worldWidth;
+    this.worldHeight = worldHeight;
+    this.screenWidth = 0;
+    this.screenHeight = 0;
+    this.shakeAmount = 0;
+    this.shakeDecay = 3;
+  }
+
+  setSize(w, h) {
+    this.screenWidth = w;
+    this.screenHeight = h;
+  }
+
+  follow(targetX, targetY) {
+    this.targetX = targetX;
+    this.targetY = targetY;
+  }
+
+  update(dt) {
+    // Smooth follow
+    this.x = Math2.lerp(this.x, this.targetX, CONSTANTS.CAMERA_SMOOTHING * dt);
+    this.y = Math2.lerp(this.y, this.targetY, CONSTANTS.CAMERA_SMOOTHING * dt);
+
+    // Clamp to world bounds
+    const halfW = this.screenWidth / 2;
+    const halfH = this.screenHeight / 2;
+    this.x = Math2.clamp(this.x, halfW, this.worldWidth - halfW);
+    this.y = Math2.clamp(this.y, halfH, this.worldHeight - halfH);
+
+    // Screen shake
+    if (this.shakeAmount > 0) {
+      this.shakeAmount = Math.max(0, this.shakeAmount - this.shakeDecay * dt);
+    }
+  }
+
+  apply(ctx) {
+    const shakeX = this.shakeAmount > 0 ? (Math.random() - 0.5) * this.shakeAmount * 2 : 0;
+    const shakeY = this.shakeAmount > 0 ? (Math.random() - 0.5) * this.shakeAmount * 2 : 0;
+    ctx.setTransform(
+      1, 0, 0, 1,
+      -this.x + this.screenWidth / 2 + shakeX,
+      -this.y + this.screenHeight / 2 + shakeY
+    );
+  }
+
+  getWorldBounds() {
+    return {
+      left: this.x - this.screenWidth / 2,
+      right: this.x + this.screenWidth / 2,
+      top: this.y - this.screenHeight / 2,
+      bottom: this.y + this.screenHeight / 2,
+    };
+  }
+
+  shake(amount) {
+    // Diminishing returns: scale shake so consecutive hits don't stack linearly
+    // Use sqrt so e.g. adding 10 when already at 12 gives ~sqrt(12)+~sqrt(10) ≈ 7.5, not 22
+    const effectiveAdd = Math.sqrt(amount);
+    this.shakeAmount = Math.min(this.shakeAmount + effectiveAdd, 12);
+  }
+
+  /** Convert world position to screen position */
+  worldToScreen(wx, wy) {
+    return {
+      x: wx - this.x + this.screenWidth / 2,
+      y: wy - this.y + this.screenHeight / 2,
+    };
+  }
+
+  /** Convert screen position to world position */
+  screenToWorld(sx, sy) {
+    return {
+      x: sx + this.x - this.screenWidth / 2,
+      y: sy + this.y - this.screenHeight / 2,
+    };
+  }
+}
+
+// ============================================================
+// ENTITY BASE CLASS
+// ============================================================
+class Entity {
+  constructor() {
+    this.id = Entity._nextId++;
+    this.x = 0;
+    this.y = 0;
+    this.vx = 0;
+    this.vy = 0;
+    this.radius = 10;
+    this.type = 'entity';
+    this.active = true;
+    this.rotation = 0;
+  }
+
+  update(dt) {}
+  draw(ctx, camera) {}
+  onCollision(other) {}
+
+  static _nextId = 1;
+}
+
+// ============================================================
+// PLAYER ENTITY (Step 1)
+// ============================================================
+class Player extends Entity {
+  constructor(input, camera) {
+    super();
+    this.type = 'player';
+    this.radius = CONSTANTS.PLAYER_RADIUS;
+    this.x = CONSTANTS.WORLD_WIDTH / 2;
+    this.y = CONSTANTS.WORLD_HEIGHT / 2;
+    this.hp = CONSTANTS.PLAYER_MAX_HP;
+    this.maxHp = CONSTANTS.PLAYER_MAX_HP;
+    this.input = input;
+    this.camera = camera;
+    this.firing = false;
+  }
+
+  update(dt) {
+    // Movement with inertia
+    const movement = this.input.getMovement();
+    this.vx += movement.x * CONSTANTS.PLAYER_ACCEL * dt;
+    this.vy += movement.y * CONSTANTS.PLAYER_ACCEL * dt;
+
+    // Friction (exponential decay: velocity drops by factor exp(-friction * time))
+    this.vx *= Math.exp(-CONSTANTS.PLAYER_FRICTION * dt);
+    this.vy *= Math.exp(-CONSTANTS.PLAYER_FRICTION * dt);
+
+    // Clamp speed
+    const speed = Math.hypot(this.vx, this.vy);
+    if (speed > CONSTANTS.PLAYER_MAX_SPEED) {
+      const n = Math2.normalize(this.vx, this.vy);
+      this.vx = n.x * CONSTANTS.PLAYER_MAX_SPEED;
+      this.vy = n.y * CONSTANTS.PLAYER_MAX_SPEED;
+    }
+
+    // Apply velocity
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+
+    // World bounds
+    this.x = Math2.clamp(this.x, this.radius, CONSTANTS.WORLD_WIDTH - this.radius);
+    this.y = Math2.clamp(this.y, this.radius, CONSTANTS.WORLD_HEIGHT - this.radius);
+
+    // Update input's knowledge of player position (for aiming)
+    this.input.updatePlayerPos(this.x, this.y);
+
+    // Rotation toward aim direction
+    const aimDir = this.input.getAimDirection(this.camera);
+    const targetAngle = aimDir.angle;
+    // Smooth rotation
+    let angleDiff = targetAngle - this.rotation;
+    // Normalize to [-PI, PI]
+    while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+    while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+    this.rotation += angleDiff * Math.min(1, CONSTANTS.PLAYER_TURN_SPEED * dt);
+
+    // Firing state
+    this.firing = this.input.isFiring();
+  }
+
+  draw(ctx, camera) {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.rotation);
+
+    // Ship body — simple triangle
+    const r = this.radius;
+    ctx.beginPath();
+    ctx.moveTo(r, 0);           // nose
+    ctx.lineTo(-r * 0.7, -r * 0.7);  // left wing
+    ctx.lineTo(-r * 0.3, 0);     // engine indent
+    ctx.lineTo(-r * 0.7, r * 0.7); // right wing
+    ctx.closePath();
+
+    // Fill with gradient
+    const grad = ctx.createLinearGradient(-r, 0, r, 0);
+    grad.addColorStop(0, '#3366cc');
+    grad.addColorStop(1, '#66aaff');
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.strokeStyle = '#88ccff';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Engine glow
+    if (Math.hypot(this.vx, this.vy) > 10) {
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.3, -r * 0.2);
+      ctx.lineTo(-r * 1.2, 0);
+      ctx.lineTo(-r * 0.3, r * 0.2);
+      ctx.closePath();
+      ctx.fillStyle = `rgba(100, 180, 255, ${0.4 + Math.random() * 0.3})`;
+      ctx.fill();
+    }
+
+    // Cockpit
+    ctx.beginPath();
+    ctx.arc(r * 0.2, 0, r * 0.25, 0, Math.PI * 2);
+    ctx.fillStyle = '#aaddff';
+    ctx.fill();
+
+    ctx.restore();
+  }
+}
+
+// ============================================================
+// PROJECTILE ENTITY (Step 2)
+// ============================================================
+class Projectile extends Entity {
+  constructor() {
+    super();
+    this.type = 'projectile';
+    this.radius = CONSTANTS.BULLET_RADIUS;
+    this.damage = CONSTANTS.BULLET_DAMAGE;
+    this.lifetime = CONSTANTS.BULLET_LIFETIME;
+    this.owner = 'player'; // 'player' or 'enemy'
+    this.active = false;
+  }
+
+  init(x, y, vx, vy, damage, lifetime, owner) {
+    this.x = x;
+    this.y = y;
+    this.vx = vx;
+    this.vy = vy;
+    this.radius = CONSTANTS.BULLET_RADIUS;
+    this.damage = damage || CONSTANTS.BULLET_DAMAGE;
+    this.lifetime = lifetime || CONSTANTS.BULLET_LIFETIME;
+    this.owner = owner || 'player';
+    this.active = true;
+    return this;
+  }
+
+  update(dt) {
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+    this.lifetime -= dt;
+    if (this.lifetime <= 0) {
+      this.active = false;
+    }
+    // Bounds check
+    if (this.x < 0 || this.x > CONSTANTS.WORLD_WIDTH ||
+        this.y < 0 || this.y > CONSTANTS.WORLD_HEIGHT) {
+      this.active = false;
+    }
+  }
+
+  draw(ctx, camera) {
+    ctx.save();
+    ctx.translate(this.x, this.y);
+
+    // Glow
+    ctx.beginPath();
+    ctx.arc(0, 0, this.radius * 2.5, 0, Math.PI * 2);
+    const glowColor = this.owner === 'player'
+      ? 'rgba(100, 200, 255, 0.15)'
+      : 'rgba(255, 100, 100, 0.15)';
+    ctx.fillStyle = glowColor;
+    ctx.fill();
+
+    // Bullet
+    ctx.beginPath();
+    ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
+    const bulletColor = this.owner === 'player'
+      ? '#66ccff'
+      : '#ff6644';
+    ctx.fillStyle = bulletColor;
+    ctx.fill();
+    ctx.strokeStyle = this.owner === 'player'
+      ? '#aaddff'
+      : '#ffaa88';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.restore();
+  }
+}
+
+// ============================================================
+// WEAPON SYSTEM (Step 2)
+// ============================================================
+class Weapon {
+  constructor(baseType) {
+    this.baseType = baseType || 'laser';
+    this.fireRate = CONSTANTS.FIRE_COOLDOWN;
+    this.cooldownTimer = 0;
+    this.damage = CONSTANTS.BULLET_DAMAGE;
+    this.speed = CONSTANTS.BULLET_SPEED;
+    this.upgrades = []; // composable upgrade layers
+  }
+
+  addUpgrade(upgrade) {
+    this.upgrades.push(upgrade);
+  }
+
+  removeUpgrade(id) {
+    this.upgrades = this.upgrades.filter(u => u.id !== id);
+  }
+
+  canFire(dt) {
+    this.cooldownTimer -= dt;
+    return this.cooldownTimer <= 0;
+  }
+
+  resetCooldown() {
+    this.cooldownTimer = this.fireRate;
+  }
+
+  /** Get fire direction considering upgrades */
+  getFireDirection(player, input, camera) {
+    // Base: aim direction
+    let aimDir = input.getAimDirection(camera);
+
+    // Each upgrade can modify the fire direction
+    for (const upgrade of this.upgrades) {
+      if (upgrade.onFire) {
+        aimDir = upgrade.onFire(aimDir, player, this);
+      }
+    }
+
+    return aimDir;
+  }
+
+  /** Fire projectiles, returns array of projectiles */
+  fire(player, entityManager, camera) {
+    if (!this.canFire(1/60)) return [];
+    this.resetCooldown();
+
+    const aimDir = this.getFireDirection(player, player.input, camera);
+    const projectiles = [];
+
+    // Each upgrade's onFire can spawn additional bullets
+    // First, the base fire
+    const baseProj = entityManager.acquireProjectile(
+      player.x + Math.cos(player.rotation) * player.radius,
+      player.y + Math.sin(player.rotation) * player.radius,
+      aimDir.x * this.speed,
+      aimDir.y * this.speed,
+      this.damage,
+      this.speed,
+      'player'
+    );
+    projectiles.push(baseProj);
+
+    // Then each upgrade's onFire
+    for (const upgrade of this.upgrades) {
+      if (upgrade.onFire) {
+        const extraProjs = upgrade.onFire(
+          { x: aimDir.x, y: aimDir.y, angle: aimDir.angle },
+          player, this
+        );
+        if (extraProjs && Array.isArray(extraProjs)) {
+          projectiles.push(...extraProjs);
+        }
+      }
+    }
+
+    return projectiles;
+  }
+}
+
+// ============================================================
+// ENTITY MANAGER (Step 2)
+// ============================================================
+class EntityManager {
+  constructor() {
+    this.projectilePool = new ObjectPool(() => new Projectile(), CONSTANTS.POOL_INITIAL);
+    this.projectiles = [];
+    this.enemyPool = new ObjectPool(() => new Enemy(), 16);
+    this.enemies = [];
+    this.allEntities = []; // for rendering
+  }
+
+  acquireProjectile(x, y, vx, vy, damage, speed, owner) {
+    const proj = this.projectilePool.acquire();
+    proj.init(x, y, vx, vy, damage, speed ? undefined : undefined, owner);
+    if (speed) proj.speed = speed;
+    this.projectiles.push(proj);
+    this.allEntities.push(proj);
+    return proj;
+  }
+
+  releaseProjectile(proj) {
+    const idx = this.projectiles.indexOf(proj);
+    if (idx >= 0) this.projectiles.splice(idx, 1);
+    this.projectilePool.release(proj);
+    const eidx = this.allEntities.indexOf(proj);
+    if (eidx >= 0) this.allEntities.splice(eidx, 1);
+  }
+
+  acquireEnemy(x, y, type, difficulty) {
+    const enemy = this.enemyPool.acquire();
+    enemy.init(x, y, type, difficulty);
+    this.enemies.push(enemy);
+    this.allEntities.push(enemy);
+    return enemy;
+  }
+
+  releaseEnemy(enemy) {
+    const idx = this.enemies.indexOf(enemy);
+    if (idx >= 0) this.enemies.splice(idx, 1);
+    this.enemyPool.release(enemy);
+    const eidx = this.allEntities.indexOf(enemy);
+    if (eidx >= 0) this.allEntities.splice(eidx, 1);
+  }
+
+  /** Query all active entities of a type */
+  getAllOfType(type) {
+    return this.allEntities.filter(e => e.active && e.type === type);
+  }
+
+  getAllActive() {
+    return this.allEntities.filter(e => e.active);
+  }
+
+  releaseAll() {
+    // Release all projectiles
+    for (const proj of this.projectiles) {
+      this.projectilePool.release(proj);
+    }
+    this.projectiles = [];
+    // Release all enemies
+    for (const enemy of this.enemies) {
+      this.enemyPool.release(enemy);
+    }
+    this.enemies = [];
+    this.allEntities = [];
+  }
+
+  update(dt) {
+    for (const proj of this.projectiles) {
+      if (proj.active) {
+        proj.update(dt);
+        if (!proj.active) {
+          this.releaseProjectile(proj);
+        }
+      }
+    }
+    for (const enemy of this.enemies) {
+      if (enemy.active) {
+        enemy.update(dt, game.player, this);
+        if (!enemy.active) {
+          this.releaseEnemy(enemy);
+        }
+      }
+    }
+  }
+
+  draw(ctx, camera) {
+    for (const entity of this.allEntities) {
+      if (entity.active) {
+        entity.draw(ctx, camera);
+      }
+    }
+  }
+}
+
+// ============================================================
+// ENEMY ENTITY (Step 3)
+// ============================================================
+class Enemy extends Entity {
+  constructor() {
+    super();
+    this.type = 'enemy';
+    this.hp = 20;
+    this.maxHp = 20;
+    this.speed = 120;
+    this.damage = 10;
+    this.radius = 14;
+    this.fireRate = 0; // 0 = no shooting (chaser)
+    this.fireCooldown = 0;
+    this.enemyType = 'chaser'; // 'chaser' or 'shooter'
+    this.active = false;
+    this.hitFlash = 0;
+  }
+
+  init(x, y, enemyType, difficulty) {
+    this.x = x;
+    this.y = y;
+    this.vx = 0;
+    this.vy = 0;
+    this.active = true;
+    this.enemyType = enemyType;
+    this.hitFlash = 0;
+
+    const hpMult = 1 + (difficulty - 1) * 0.3;
+    const speedMult = 1 + (difficulty - 1) * 0.1;
+
+    if (enemyType === 'shooter') {
+      this.radius = CONSTANTS.ENEMY_SHOOTER_RADIUS;
+      this.hp = Math.round(CONSTANTS.ENEMY_SHOOTER_HP * hpMult);
+      this.maxHp = this.hp;
+      this.speed = CONSTANTS.ENEMY_SHOOTER_SPEED * speedMult;
+      this.damage = CONSTANTS.ENEMY_SHOOTER_DAMAGE;
+      this.fireRate = CONSTANTS.ENEMY_SHOOTER_FIRE_RATE;
+      this.fireCooldown = Math.random() * 2; // stagger initial fire
+    } else {
+      this.radius = CONSTANTS.ENEMY_CHASER_RADIUS;
+      this.hp = Math.round(CONSTANTS.ENEMY_CHASER_HP * hpMult);
+      this.maxHp = this.hp;
+      this.speed = CONSTANTS.ENEMY_CHASER_SPEED * speedMult;
+      this.damage = CONSTANTS.ENEMY_CHASER_DAMAGE;
+      this.fireRate = 0;
+    }
+    return this;
+  }
+
+  update(dt, player, entityManager) {
+    if (!this.active) return;
+
+    // Simple AI: move toward player
+    const dx = player.x - this.x;
+    const dy = player.y - this.y;
+    const dir = Math2.normalize(dx, dy);
+
+    // Shooters try to maintain distance
+    let moveSpeed = this.speed;
+    if (this.enemyType === 'shooter') {
+      const distToPlayer = Math.hypot(dx, dy);
+      if (distToPlayer < 200) {
+        // Back away if too close
+        moveSpeed = -this.speed * 0.5;
+      } else if (distToPlayer > 400) {
+        // Move closer if too far
+        moveSpeed = this.speed * 0.5;
+      } else {
+        // Circle strafe
+        moveSpeed = 0;
+        // Strafe perpendicular to player direction
+        const strafeDir = Math2.normalize(-dir.y, dir.x);
+        this.vx += strafeDir.x * this.speed * 0.5 * dt;
+        this.vy += strafeDir.y * this.speed * 0.5 * dt;
+      }
+      // Shooter rotation toward player
+      this.rotation = Math.atan2(dy, dx);
+    } else {
+      // Chaser rotation
+      this.rotation = Math.atan2(dy, dx);
+    }
+
+    // Apply velocity for chasers
+    if (this.enemyType === 'chaser') {
+      this.vx += dir.x * moveSpeed * dt;
+      this.vy += dir.y * moveSpeed * dt;
+    }
+
+    // Damping
+    this.vx *= Math.exp(-3 * dt);
+    this.vy *= Math.exp(-3 * dt);
+
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+
+    // Clamp to world bounds
+    this.x = Math2.clamp(this.x, this.radius, CONSTANTS.WORLD_WIDTH - this.radius);
+    this.y = Math2.clamp(this.y, this.radius, CONSTANTS.WORLD_HEIGHT - this.radius);
+
+    // Update hit flash
+    if (this.hitFlash > 0) {
+      this.hitFlash -= dt * 5;
+      if (this.hitFlash < 0) this.hitFlash = 0;
+    }
+
+    // Shooter fire
+    if (this.fireRate > 0) {
+      this.fireCooldown -= dt;
+      if (this.fireCooldown <= 0) {
+        this.fireCooldown = this.fireRate;
+        this._shoot(player, entityManager);
+      }
+    }
+  }
+
+  _shoot(player, entityManager) {
+    const dx = player.x - this.x;
+    const dy = player.y - this.y;
+    const dir = Math2.normalize(dx, dy);
+
+    const proj = entityManager.acquireProjectile(
+      this.x + dir.x * (this.radius + 5),
+      this.y + dir.y * (this.radius + 5),
+      dir.x * 250,
+      dir.y * 250,
+      this.damage,
+      2.5,
+      'enemy'
+    );
+  }
+
+  takeDamage(amount) {
+    this.hp -= amount;
+    this.hitFlash = 1;
+    if (this.hp <= 0) {
+      this.active = false;
+    }
+  }
+
+  draw(ctx, camera) {
+    if (!this.active) return;
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.rotation);
+
+    const r = this.radius;
+
+    // Hit flash effect
+    if (this.hitFlash > 0) {
+      ctx.shadowColor = '#fff';
+      ctx.shadowBlur = 15 * this.hitFlash;
+    }
+
+    if (this.enemyType === 'chaser') {
+      // Chaser: jagged diamond shape
+      ctx.beginPath();
+      ctx.moveTo(r, 0);
+      ctx.lineTo(r * 0.3, -r * 0.6);
+      ctx.lineTo(-r * 0.5, -r * 0.3);
+      ctx.lineTo(-r, 0);
+      ctx.lineTo(-r * 0.5, r * 0.3);
+      ctx.lineTo(r * 0.3, r * 0.6);
+      ctx.closePath();
+
+      const fillColor = this.hitFlash > 0
+        ? '#ff4444' : '#cc3333';
+      ctx.fillStyle = fillColor;
+      ctx.fill();
+      ctx.strokeStyle = '#ff6666';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    } else {
+      // Shooter: hexagonal shape
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const angle = (Math.PI / 3) * i - Math.PI / 6;
+        const px = Math.cos(angle) * r;
+        const py = Math.sin(angle) * r;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+
+      const fillColor = this.hitFlash > 0
+        ? '#ffaa44' : '#dd8833';
+      ctx.fillStyle = fillColor;
+      ctx.fill();
+      ctx.strokeStyle = '#ffcc66';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // Cannon barrel
+      ctx.fillStyle = '#ffaa44';
+      ctx.fillRect(r * 0.3, -3, r * 0.7, 6);
+    }
+
+    // HP bar (only if damaged)
+    if (this.hp < this.maxHp) {
+      ctx.rotate(-this.rotation); // Un-rotate for HP bar
+      const barWidth = r * 2;
+      const barHeight = 3;
+      const barY = -r - 10;
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(-barWidth / 2, barY, barWidth, barHeight);
+      const hpPct = this.hp / this.maxHp;
+      ctx.fillStyle = hpPct > 0.5 ? '#44cc44' : hpPct > 0.25 ? '#cccc44' : '#cc4444';
+      ctx.fillRect(-barWidth / 2, barY, barWidth * hpPct, barHeight);
+    }
+
+    ctx.restore();
+  }
+}
+
+// ============================================================
+// SPAWNER MODULE (Step 3)
+// ============================================================
+class Spawner {
+  constructor(entityManager, worldWidth, worldHeight) {
+    this.entityManager = entityManager;
+    this.worldWidth = worldWidth;
+    this.worldHeight = worldHeight;
+    this.wave = 0;
+    this.waveTimer = CONSTANTS.WAVE_TIMER_INITIAL;
+    this.enemiesRemaining = 0;
+    this.spawnQueue = [];
+    this.spawnRate = 0.5; // seconds between individual spawns in a wave
+    this.spawnTimer = 0;
+    this.totalEnemiesSpawned = 0;
+  }
+
+  startWave(playerX, playerY) {
+    this.wave++;
+    const baseCount = CONSTANTS.WAVE_INITIAL_ENEMIES +
+      (this.wave - 1) * CONSTANTS.WAVE_ENEMIES_INCREMENT;
+    const maxWaveSpawn = Math.min(baseCount, 30); // cap at 30
+
+    // Determine spawn positions around the player (off-screen)
+    this.spawnQueue = [];
+    const numChasers = Math.floor(maxWaveSpawn * 0.6);
+    const numShooters = maxWaveSpawn - numChasers;
+
+    // Chasers spawn closer, shooters spawn further
+    for (let i = 0; i < maxWaveSpawn; i++) {
+      const isShooter = i >= numChasers;
+      const angle = (Math.PI * 2 * i) / maxWaveSpawn + Math.random() * 0.3;
+      const dist = isShooter ? 400 + Math.random() * 200 : 300 + Math.random() * 150;
+      const sx = playerX + Math.cos(angle) * dist;
+      const sy = playerY + Math.sin(angle) * dist;
+      // Clamp to world
+      const clampedX = Math2.clamp(sx, CONSTANTS.SPAWN_MARGIN, this.worldWidth - CONSTANTS.SPAWN_MARGIN);
+      const clampedY = Math2.clamp(sy, CONSTANTS.SPAWN_MARGIN, this.worldHeight - CONSTANTS.SPAWN_MARGIN);
+      this.spawnQueue.push({
+        x: clampedX,
+        y: clampedY,
+        type: isShooter ? 'shooter' : 'chaser',
+        difficulty: this.wave
+      });
+    }
+
+    this.enemiesRemaining = maxWaveSpawn;
+    this.spawnRate = Math.max(0.2, 0.5 - (this.wave - 1) * 0.03);
+    this.spawnTimer = 0;
+  }
+
+  update(dt, player, entityManager) {
+    // If all enemies spawned and all dead, start next wave
+    if (this.spawnQueue.length === 0 && this.enemiesRemaining <= 0) {
+      this.waveTimer -= dt;
+      if (this.waveTimer <= 0) {
+        this.startWave(player.x, player.y);
+        this.waveTimer = Math.max(CONSTANTS.WAVE_TIMER_MIN,
+          CONSTANTS.WAVE_TIMER_INITIAL - (this.wave - 1) * CONSTANTS.WAVE_TIMER_DECREASE);
+      }
+      return;
+    }
+
+    // Spawn enemies from queue
+    if (this.spawnQueue.length > 0) {
+      this.spawnTimer -= dt;
+      if (this.spawnTimer <= 0) {
+        const spawnData = this.spawnQueue.shift();
+        this._spawnEnemy(spawnData.x, spawnData.y, spawnData.type, spawnData.difficulty,
+          entityManager);
+        this.spawnTimer = this.spawnRate;
+      }
+    }
+  }
+
+  _spawnEnemy(x, y, type, difficulty, entityManager) {
+    const enemy = entityManager.acquireEnemy(x, y, type, difficulty);
+    this.enemiesRemaining--;
+    this.totalEnemiesSpawned++;
+  }
+
+  getEnemiesRemaining() {
+    return this.spawnQueue.length + this.enemiesRemaining;
+  }
+
+  getWave() {
+    return this.wave;
+  }
+}
+
+// ============================================================
+// PHYSICS / COLLISION (Step 2)
+// ============================================================
+class Physics {
+  /** Circle-circle collision test */
+  static circleCircle(a, b) {
+    const dist = Math2.dist(a.x, a.y, b.x, b.y);
+    return dist < a.radius + b.radius;
+  }
+
+  /** Find all collisions between two groups */
+  static findCollisions(groupA, groupB) {
+    const collisions = [];
+    for (const a of groupA) {
+      if (!a.active) continue;
+      for (const b of groupB) {
+        if (!b.active) continue;
+        if (this.circleCircle(a, b)) {
+          collisions.push({ a, b });
+        }
+      }
+    }
+    return collisions;
+  }
+
+  /** Find collisions within a single group (self-joining) */
+  static findCollisionsSelf(group) {
+    const collisions = [];
+    for (let i = 0; i < group.length; i++) {
+      const a = group[i];
+      if (!a.active) continue;
+      for (let j = i + 1; j < group.length; j++) {
+        const b = group[j];
+        if (!b.active) continue;
+        if (this.circleCircle(a, b)) {
+          collisions.push({ a, b });
+        }
+      }
+    }
+    return collisions;
+  }
+}
+
+// ============================================================
+// RENDERER (Step 1)
+// ============================================================
+class Renderer {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.resize();
+    window.addEventListener('resize', () => this.resize());
+  }
+
+  resize() {
+    this.canvas.width = window.innerWidth;
+    this.canvas.height = window.innerHeight;
+    if (this.camera) {
+      this.camera.setSize(this.canvas.width, this.canvas.height);
+    }
+  }
+
+  clear() {
+    this.ctx.fillStyle = '#0a0a12';
+    this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+  }
+
+  drawWorldBounds(camera) {
+    const ctx = this.ctx;
+    ctx.save();
+    camera.apply(ctx);
+
+    // Grid
+    ctx.strokeStyle = 'rgba(50, 50, 80, 0.3)';
+    ctx.lineWidth = 0.5;
+    const gridSize = 100;
+    for (let x = 0; x <= CONSTANTS.WORLD_WIDTH; x += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, CONSTANTS.WORLD_HEIGHT);
+      ctx.stroke();
+    }
+    for (let y = 0; y <= CONSTANTS.WORLD_HEIGHT; y += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(CONSTANTS.WORLD_WIDTH, y);
+      ctx.stroke();
+    }
+
+    // World border
+    ctx.strokeStyle = 'rgba(100, 150, 255, 0.4)';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(0, 0, CONSTANTS.WORLD_WIDTH, CONSTANTS.WORLD_HEIGHT);
+
+    ctx.restore();
+  }
+
+  drawCrosshair(camera, input) {
+    const screenPos = input.getCrosshairScreenPos();
+    const ctx = this.ctx;
+
+    ctx.save();
+    // Crosshair in screen space
+    ctx.translate(screenPos.x, screenPos.y);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.lineWidth = 1.5;
+    const size = 10;
+    ctx.beginPath();
+    ctx.moveTo(-size, 0); ctx.lineTo(-4, 0);
+    ctx.moveTo(size, 0); ctx.lineTo(4, 0);
+    ctx.moveTo(0, -size); ctx.lineTo(0, -4);
+    ctx.moveTo(0, size); ctx.lineTo(0, 4);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, 0, 2, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ============================================================
+// GAME CLASS (Steps 1-3)
+// ============================================================
+const GameState = { PLAYING: 'playing', GAME_OVER: 'game_over' };
+let game = null; // Global ref for enemy update callbacks
+
+class Game {
+  constructor() {
+    this.canvas = document.getElementById('gameCanvas');
+    this.renderer = new Renderer(this.canvas);
+    this.camera = new Camera(CONSTANTS.WORLD_WIDTH, CONSTANTS.WORLD_HEIGHT);
+    this.input = new InputManager(this.canvas);
+    this.entityManager = new EntityManager();
+    this.player = new Player(this.input, this.camera);
+    this.weapon = new Weapon('laser');
+    this.spawner = new Spawner(this.entityManager, CONSTANTS.WORLD_WIDTH, CONSTANTS.WORLD_HEIGHT);
+
+    this.running = false;
+    this.state = GameState.PLAYING;
+    this.lastTime = 0;
+    this.frameCount = 0;
+    this.score = 0;
+
+    // Keyboard restart
+    window.addEventListener('keydown', (e) => {
+      if (this.state === GameState.GAME_OVER && e.code === 'Space') {
+        e.preventDefault();
+        this._restart();
+      }
+    });
+    this.canvas.addEventListener('click', () => {
+      if (this.state === GameState.GAME_OVER) {
+        this._restart();
+      }
+    });
+
+    this._setupUI();
+    this._start();
+  }
+
+  _setupUI() {
+    this._updateHPBar();
+    document.getElementById('score-display').textContent = 'Score: 0';
+    document.getElementById('weapon-display').textContent = 'Laser';
+    document.getElementById('instructions').textContent =
+      'WASD to move · Click to shoot · Mouse to aim';
+  }
+
+  _updateHPBar() {
+    const pct = Math.max(0, this.player.hp / this.player.maxHp * 100);
+    document.getElementById('hp-bar').style.width = pct + '%';
+    document.getElementById('hp-text').textContent =
+      `${Math.ceil(this.player.hp)} / ${this.player.maxHp}`;
+    // Color change based on HP
+    const hpBar = document.getElementById('hp-bar');
+    if (pct > 50) {
+      hpBar.style.background = 'linear-gradient(90deg, #44cc44, #66dd66)';
+    } else if (pct > 25) {
+      hpBar.style.background = 'linear-gradient(90deg, #cccc44, #dddd66)';
+    } else {
+      hpBar.style.background = 'linear-gradient(90deg, #cc3333, #ff6666)';
+    }
+  }
+
+  _start() {
+    game = this; // Global ref for enemy callbacks
+    this.running = true;
+    this.lastTime = performance.now();
+    // Start first wave
+    this.spawner.startWave(this.player.x, this.player.y);
+    this._loop(this.lastTime);
+  }
+
+  _restart() {
+    // Clear all entities
+    this.entityManager.releaseAll();
+
+    // Reset player
+    this.player.x = CONSTANTS.WORLD_WIDTH / 2;
+    this.player.y = CONSTANTS.WORLD_HEIGHT / 2;
+    this.player.vx = 0;
+    this.player.vy = 0;
+    this.player.hp = CONSTANTS.PLAYER_MAX_HP;
+    this.player.maxHp = CONSTANTS.PLAYER_MAX_HP;
+    this.player.rotation = 0;
+    this.player.active = true;
+
+    // Reset spawner
+    this.spawner = new Spawner(this.entityManager, CONSTANTS.WORLD_WIDTH, CONSTANTS.WORLD_HEIGHT);
+    this.spawner.startWave(this.player.x, this.player.y);
+
+    // Reset score
+    this.score = 0;
+    this.state = GameState.PLAYING;
+
+    // Reset shake
+    this.camera.shakeAmount = 0;
+
+    // Reset UI
+    this._updateHPBar();
+    document.getElementById('score-display').textContent = 'Score: 0';
+    document.getElementById('weapon-display').textContent = 'Laser';
+    document.getElementById('instructions').textContent =
+      'WASD to move · Click to shoot · Mouse to aim';
+  }
+
+  _handleGameOver() {
+    if (this.state === GameState.GAME_OVER) return;
+    this.state = GameState.GAME_OVER;
+    // Clear any lingering shake — no shake during game-over screen
+    this.camera.shakeAmount = 0;
+    document.getElementById('instructions').innerHTML =
+      `<span style="color:#ff4444;font-size:16px;">GAME OVER</span><br>` +
+      `Final Score: <span style="color:#ffcc44;">${this.score}</span><br>` +
+      `Reached Wave: ${this.spawner.getWave()}<br>` +
+      `<span style="color:rgba(255,255,255,0.5);">Press SPACE or Click to restart</span>`;
+  }
+
+  _loop(now) {
+    if (!this.running) return;
+
+    let dt = (now - this.lastTime) / 1000;
+    this.lastTime = now;
+    // Clamp dt to avoid spiral of death
+    dt = Math.min(dt, 0.05);
+
+    this._update(dt);
+    this._render();
+
+    this.frameCount++;
+    requestAnimationFrame((t) => this._loop(t));
+  }
+
+  _update(dt) {
+    if (this.state !== GameState.PLAYING) return;
+
+    // Update player
+    this.player.update(dt);
+
+    // Camera follows player
+    this.camera.follow(this.player.x, this.player.y);
+    this.camera.update(dt);
+
+    // Weapon firing
+    if (this.player.firing && this.weapon.canFire(dt)) {
+      this.weapon.fire(this.player, this.entityManager, this.camera);
+    }
+
+    // Update spawner (spawn enemies)
+    this.spawner.update(dt, this.player, this.entityManager);
+
+    // Update entities
+    this.entityManager.update(dt);
+
+    // Collision detection
+    this._handleCollisions();
+
+    // UI updates
+    this._updateHPBar();
+  }
+
+  _handleCollisions() {
+    const projectiles = this.entityManager.getAllOfType('projectile');
+    const enemies = this.entityManager.getAllOfType('enemy');
+
+    // Projectile vs Enemy (player bullets hit enemies)
+    for (const proj of projectiles) {
+      if (!proj.active) continue;
+      if (proj.owner !== 'player') continue;
+
+      for (const enemy of enemies) {
+        if (!enemy.active) continue;
+        if (Physics.circleCircle(proj, enemy)) {
+          enemy.takeDamage(proj.damage);
+          proj.active = false;
+          this.entityManager.releaseProjectile(proj);
+          break; // Bullet can only hit one enemy
+        }
+      }
+    }
+
+    // Projectile vs Player (enemy bullets hit player)
+    for (const proj of projectiles) {
+      if (!proj.active) continue;
+      if (proj.owner === 'player') continue;
+
+      if (Physics.circleCircle(proj, this.player)) {
+        this.player.hp -= proj.damage;
+        this.camera.shake(5);
+        proj.active = false;
+        this.entityManager.releaseProjectile(proj);
+        if (this.player.hp <= 0) {
+          this.player.hp = 0;
+          this.player.active = false;
+          this._handleGameOver();
+        }
+      }
+    }
+
+    // Enemy vs Player (contact damage)
+    for (const enemy of enemies) {
+      if (!enemy.active) continue;
+      if (Physics.circleCircle(enemy, this.player)) {
+        this.player.hp -= enemy.damage * 0.5; // contact damage (half)
+        this.camera.shake(8);
+        // Push enemy back slightly
+        const pushDir = Math2.normalize(this.player.x - enemy.x, this.player.y - enemy.y);
+        enemy.vx += pushDir.x * 200;
+        enemy.vy += pushDir.y * 200;
+        if (this.player.hp <= 0) {
+          this.player.hp = 0;
+          this.player.active = false;
+          this._handleGameOver();
+        }
+      }
+    }
+  }
+
+  _render() {
+    const ctx = this.renderer.ctx;
+    const camera = this.camera;
+
+    // Ensure camera knows current viewport size
+    camera.setSize(this.canvas.width, this.canvas.height);
+
+    // Clear
+    this.renderer.clear();
+
+    // Draw world (grid + borders) with camera transform
+    ctx.save();
+    camera.apply(ctx);
+    this.renderer.drawWorldBounds(camera);
+    ctx.restore();
+
+    // Draw game objects with camera transform
+    ctx.save();
+    camera.apply(ctx);
+    this.entityManager.draw(ctx, camera);
+    if (this.player.active) {
+      this.player.draw(ctx, camera);
+    }
+    ctx.restore();
+
+    // Draw crosshair in screen space (no camera transform)
+    this.renderer.drawCrosshair(camera, this.input);
+
+    // Minimap
+    this._drawMinimap();
+
+    // Wave info
+    this._drawWaveInfo();
+  }
+
+  _drawMinimap() {
+    const ctx = this.renderer.ctx;
+    const mapSize = 120;
+    const mapX = this.canvas.width - mapSize - 12;
+    const mapY = this.canvas.height - mapSize - 40;
+    const scaleX = mapSize / CONSTANTS.WORLD_WIDTH;
+    const scaleY = mapSize / CONSTANTS.WORLD_HEIGHT;
+
+    // Background
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.fillRect(mapX, mapY, mapSize, mapSize);
+    ctx.strokeStyle = 'rgba(100, 150, 255, 0.3)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(mapX, mapY, mapSize, mapSize);
+
+    // Player dot
+    const px = mapX + this.player.x * scaleX;
+    const py = mapY + this.player.y * scaleY;
+    ctx.fillStyle = '#66ccff';
+    ctx.beginPath();
+    ctx.arc(px, py, 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Enemy dots
+    for (const enemy of this.entityManager.enemies) {
+      if (!enemy.active) continue;
+      const ex = mapX + enemy.x * scaleX;
+      const ey = mapY + enemy.y * scaleY;
+      ctx.fillStyle = enemy.enemyType === 'shooter' ? '#ffaa44' : '#ff4444';
+      ctx.beginPath();
+      ctx.arc(ex, ey, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Camera view rect
+    const bounds = this.camera.getWorldBounds();
+    const vx = mapX + bounds.left * scaleX;
+    const vy = mapY + bounds.top * scaleY;
+    const vw = (bounds.right - bounds.left) * scaleX;
+    const vh = (bounds.bottom - bounds.top) * scaleY;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+    ctx.strokeRect(vx, vy, vw, vh);
+
+    // Projectiles
+    for (const proj of this.entityManager.projectiles) {
+      if (!proj.active) continue;
+      const ppx = mapX + proj.x * scaleX;
+      const ppy = mapY + proj.y * scaleY;
+      ctx.fillStyle = proj.owner === 'player' ? '#66ccff' : '#ff6644';
+      ctx.fillRect(ppx - 1, ppy - 1, 2, 2);
+    }
+  }
+
+  _drawWaveInfo() {
+    const ctx = this.renderer.ctx;
+    const enemiesLeft = this.spawner.getEnemiesRemaining();
+    const wave = this.spawner.getWave();
+
+    // Wave text (center top)
+    ctx.save();
+    ctx.font = 'bold 16px monospace';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+    ctx.textAlign = 'center';
+    ctx.fillText(`Wave ${wave}`, this.canvas.width / 2, 24);
+
+    // Enemies remaining
+    ctx.font = '13px monospace';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+    ctx.fillText(`Enemies: ${enemiesLeft}`, this.canvas.width / 2, 44);
+    ctx.restore();
+  }
+}
+
+// ============================================================
+// BOOTSTRAP
+// ============================================================
+window.addEventListener('DOMContentLoaded', () => {
+  new Game();
+});
+
+})();
+</script>
+</body>
+</html>
