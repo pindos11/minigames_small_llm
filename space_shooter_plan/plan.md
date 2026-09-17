@@ -217,17 +217,20 @@ Pickups drop as entities with a `dropType` field. Player pickup collects and tri
 
 ---
 
-### Step 4 — Obstacles (Asteroids/Walls) & Spatial Hashing
+### Step 4 — Obstacles (Asteroids/Walls) & Spatial Hashing ✅ DONE
 **Goal:** Static obstacles that block ships, enemies, and projectiles.
+> **Implemented** in `space_shooter.html` — `SpatialGrid` with 100px cells for O(1) broad-phase, `Obstacle` entity (circle asteroids + rectangle walls), `WorldGenerator` with procedural placement avoiding spawn area, full collision pipeline (player/enemy bounce+slide, projectiles destroyed on impact), proper axis-aligned resolution for walls, minimap obstacle rendering.
 
 | What | Details |
 |---|---|
-| `Obstacle` entity | Circle or rectangle shapes, static (no velocity) |
-| Spatial grid | Divide world into cells; collision queries only check nearby cells |
-| Collision resolution | Player/Enemy bounce or stop. Projectiles destroy on impact (or deflect). |
-| World generation | Random asteroid fields + optional wall structures |
+| `SpatialGrid` | Hash grid (100×100 cells). `insert()`, `queryCircle()`, `queryRect()`, `build()` — O(1) broad-phase vs O(n²) brute force |
+| `Obstacle` entity | Circle (irregular asteroids with craters, radial gradient) or Rect (metallic walls with detail lines). `_circleCollide`, `_circleRectCollide` (rotated), `_resolveCircleCollision`, `_resolveRectCollision` — per-face overlap for axis-aligned push |
+| `WorldGenerator` | Places 15 asteroids + 6 walls with 50-attempt retry, keeps obstacles 30-40px apart, avoids center spawn zone |
+| Collision resolution | Player/Enemy: push out + velocity bounce with 0.4 damping, perpendicular to hit face. Projectiles: destroyed on impact |
+| World generation | Procedural — asteroids (12-point irregular polygons), walls (60px thick, 100-250px long), rotationally varied |
+| Minimap | Obstacles shown as gray squares scaled by map ratio |
 
-**Deliverable:** Obstacles visible on map. Ships and bullets collide with them. Performance via spatial grid.
+**Deliverable:** Obstacles visible on map. Ships and bullets collide with them. Performance via spatial grid. Walls resolve axis-aligned (no diagonal push bug).
 
 ---
 

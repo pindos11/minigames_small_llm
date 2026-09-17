@@ -189,8 +189,110 @@ const CONSTANTS = {
 };
 
 // ============================================================
-// MATH UTILITIES (vec2)
+// CONSTANTS (extend)
 // ============================================================
+CONSTANTS.OBSTACLE_MIN_RADIUS = 20;
+CONSTANTS.OBSTACLE_MAX_RADIUS = 50;
+CONSTANTS.OBSTACLE_COUNT = 15;
+CONSTANTS.OBSTACLE_MIN_DIST = 80;  // min distance from world center (player spawn)
+CONSTANTS.WALL_COUNT = 6;
+CONSTANTS.WALL_WIDTH = 60;
+CONSTANTS.WALL_LENGTH_MIN = 100;
+CONSTANTS.WALL_LENGTH_MAX = 250;
+CONSTANTS.SPATIAL_CELL_SIZE = 100;
+
+// ============================================================
+// SPATIAL HASH GRID
+// ============================================================
+class SpatialGrid {
+  constructor(cellSize, worldWidth, worldHeight) {
+    this.cellSize = cellSize;
+    this.worldWidth = worldWidth;
+    this.worldHeight = worldHeight;
+    this.cols = Math.ceil(worldWidth / cellSize);
+    this.rows = Math.ceil(worldHeight / cellSize);
+    this.cells = new Map(); // "col,row" -> [entities]
+    this._clear();
+  }
+
+  _clear() {
+    this.cells.clear();
+  }
+
+  _key(col, row) {
+    return col + ',' + row;
+  }
+
+  insert(entity) {
+    const { x, y, radius } = entity;
+    const minCol = Math.floor((x - radius) / this.cellSize);
+    const maxCol = Math.floor((x + radius) / this.cellSize);
+    const minRow = Math.floor((y - radius) / this.cellSize);
+    const maxRow = Math.floor((y + radius) / this.cellSize);
+
+    for (let col = minCol; col <= maxCol; col++) {
+      for (let row = minRow; row <= maxRow; row++) {
+        if (col < 0 || col >= this.cols || row < 0 || row >= this.rows) continue;
+        const key = this._key(col, row);
+        if (!this.cells.has(key)) this.cells.set(key, []);
+        this.cells.get(key).push(entity);
+      }
+    }
+  }
+
+  /** Get entities in cells overlapping the given circle */
+  queryCircle(x, y, radius) {
+    const result = new Set();
+    const minCol = Math.floor((x - radius) / this.cellSize);
+    const maxCol = Math.floor((x + radius) / this.cellSize);
+    const minRow = Math.floor((y - radius) / this.cellSize);
+    const maxRow = Math.floor((y + radius) / this.cellSize);
+
+    for (let col = minCol; col <= maxCol; col++) {
+      for (let row = minRow; row <= maxRow; row++) {
+        if (col < 0 || col >= this.cols || row < 0 || row >= this.rows) continue;
+        const key = this._key(col, row);
+        const cell = this.cells.get(key);
+        if (cell) {
+          for (const e of cell) result.add(e);
+        }
+      }
+    }
+    return result;
+  }
+
+  /** Get entities in a rectangular region */
+  queryRect(x, y, w, h) {
+    const result = new Set();
+    const minCol = Math.floor(x / this.cellSize);
+    const maxCol = Math.floor((x + w) / this.cellSize);
+    const minRow = Math.floor(y / this.cellSize);
+    const maxRow = Math.floor((y + h) / this.cellSize);
+
+    for (let col = minCol; col <= maxCol; col++) {
+      for (let row = minRow; row <= maxRow; row++) {
+        if (col < 0 || col >= this.cols || row < 0 || row >= this.rows) continue;
+        const key = this._key(col, row);
+        const cell = this.cells.get(key);
+        if (cell) {
+          for (const e of cell) result.add(e);
+        }
+      }
+    }
+    return result;
+  }
+
+  build(entities) {
+    this._clear();
+    for (const e of entities) {
+      if (e.active) this.insert(e);
+    }
+  }
+}
+
+// ============================================================
+// MATH UTILITIES (vec2)
+// ===============================================================
 const Math2 = {
   lerp(a, b, t) { return a + (b - a) * t; },
   clamp(v, min, max) { return Math.max(min, Math.min(max, v)); },
@@ -616,6 +718,7 @@ class Player extends Entity {
     this.input = input;
     this.camera = camera;
     this.firing = false;
+    this.game = null; // reference set in Game.start
   }
 
   update(dt) {
@@ -644,6 +747,11 @@ class Player extends Entity {
     this.x = Math2.clamp(this.x, this.radius, CONSTANTS.WORLD_WIDTH - this.radius);
     this.y = Math2.clamp(this.y, this.radius, CONSTANTS.WORLD_HEIGHT - this.radius);
 
+    // Resolve obstacle collisions
+    if (this.game && this.game.entityManager) {
+      this._resolveObstacleCollisions(this.game.entityManager);
+    }
+
     // Update input's knowledge of player position (for aiming)
     this.input.updatePlayerPos(this.x, this.y);
 
@@ -659,6 +767,27 @@ class Player extends Entity {
 
     // Firing state
     this.firing = this.input.isFiring();
+  }
+
+  /** Resolve collisions with all obstacles, pushing player out */
+  _resolveObstacleCollisions(entityManager) {
+    for (const obs of entityManager.obstacles) {
+      if (!obs.active) continue;
+
+      let collided = false;
+      if (obs.obstacleType === 'circle') {
+        collided = obs._circleCollide(this);
+      } else {
+        collided = obs._circleRectCollide(this.x, this.y, this.radius);
+      }
+
+      if (collided) {
+        obs.resolveCollision(this, 300);
+        // Kill horizontal velocity on impact for better feel
+        this.vx *= 0.7;
+        this.vy *= 0.7;
+      }
+    }
   }
 
   draw(ctx, camera) {
@@ -776,6 +905,17 @@ class Projectile extends Entity {
 
     ctx.restore();
   }
+
+  /** Check collision with an obstacle, return true if hit */
+  collidesWithObstacle(obs) {
+    if (!obs.active) return false;
+
+    if (obs.obstacleType === 'circle') {
+      return obs._circleCollide(this);
+    } else {
+      return obs._circleRectCollide(this.x, this.y, this.radius);
+    }
+  }
 }
 
 // ============================================================
@@ -862,7 +1002,7 @@ class Weapon {
 }
 
 // ============================================================
-// ENTITY MANAGER (Step 2)
+// ENTITY MANAGER (Steps 2 & 4)
 // ============================================================
 class EntityManager {
   constructor() {
@@ -870,7 +1010,9 @@ class EntityManager {
     this.projectiles = [];
     this.enemyPool = new ObjectPool(() => new Enemy(), 16);
     this.enemies = [];
+    this.obstacles = []; // static obstacles
     this.allEntities = []; // for rendering
+    this.spatialGrid = new SpatialGrid(CONSTANTS.SPATIAL_CELL_SIZE, CONSTANTS.WORLD_WIDTH, CONSTANTS.WORLD_HEIGHT);
   }
 
   acquireProjectile(x, y, vx, vy, damage, speed, owner) {
@@ -890,6 +1032,21 @@ class EntityManager {
     if (eidx >= 0) this.allEntities.splice(eidx, 1);
   }
 
+  acquireObstacle(x, y, radius) {
+    const obs = new Obstacle();
+    obs.initCircle(x, y, radius);
+    this.obstacles.push(obs);
+    this.allEntities.push(obs);
+    return obs;
+  }
+
+  releaseObstacle(obs) {
+    const idx = this.obstacles.indexOf(obs);
+    if (idx >= 0) this.obstacles.splice(idx, 1);
+    const eidx = this.allEntities.indexOf(obs);
+    if (eidx >= 0) this.allEntities.splice(eidx, 1);
+  }
+
   acquireEnemy(x, y, type, difficulty) {
     const enemy = this.enemyPool.acquire();
     enemy.init(x, y, type, difficulty);
@@ -904,6 +1061,26 @@ class EntityManager {
     this.enemyPool.release(enemy);
     const eidx = this.allEntities.indexOf(enemy);
     if (eidx >= 0) this.allEntities.splice(eidx, 1);
+  }
+
+  /** Rebuild spatial grid from all active entities */
+  buildSpatialGrid() {
+    const entities = [];
+    for (const obs of this.obstacles) {
+      if (obs.active) entities.push(obs);
+    }
+    for (const proj of this.projectiles) {
+      if (proj.active) entities.push(proj);
+    }
+    for (const enemy of this.enemies) {
+      if (enemy.active) entities.push(enemy);
+    }
+    this.spatialGrid.build(entities);
+  }
+
+  /** Query nearby entities via spatial grid */
+  queryNearby(x, y, radius) {
+    return this.spatialGrid.queryCircle(x, y, radius);
   }
 
   /** Query all active entities of a type */
@@ -926,7 +1103,13 @@ class EntityManager {
       this.enemyPool.release(enemy);
     }
     this.enemies = [];
+    // Release all obstacles
+    for (const obs of this.obstacles) {
+      obs.active = false;
+    }
+    this.obstacles = [];
     this.allEntities = [];
+    this.spatialGrid._clear();
   }
 
   update(dt) {
@@ -945,6 +1128,9 @@ class EntityManager {
           this.releaseEnemy(enemy);
         }
       }
+    }
+    for (const obs of this.obstacles) {
+      if (obs.active) obs.update(dt);
     }
   }
 
@@ -1057,6 +1243,9 @@ class Enemy extends Entity {
     this.x = Math2.clamp(this.x, this.radius, CONSTANTS.WORLD_WIDTH - this.radius);
     this.y = Math2.clamp(this.y, this.radius, CONSTANTS.WORLD_HEIGHT - this.radius);
 
+    // Resolve obstacle collisions
+    this._resolveObstacleCollisions(entityManager);
+
     // Update hit flash
     if (this.hitFlash > 0) {
       this.hitFlash -= dt * 5;
@@ -1087,6 +1276,27 @@ class Enemy extends Entity {
       2.5,
       'enemy'
     );
+  }
+
+  /** Resolve collisions with all obstacles, pushing enemy out */
+  _resolveObstacleCollisions(entityManager) {
+    for (const obs of entityManager.obstacles) {
+      if (!obs.active) continue;
+
+      let collided = false;
+      if (obs.obstacleType === 'circle') {
+        collided = obs._circleCollide(this);
+      } else {
+        collided = obs._circleRectCollide(this.x, this.y, this.radius);
+      }
+
+      if (collided) {
+        obs.resolveCollision(this, 200);
+        // Adjust movement to slide along obstacle
+        this.vx *= 0.8;
+        this.vy *= 0.8;
+      }
+    }
   }
 
   takeDamage(amount) {
@@ -1182,7 +1392,6 @@ class Spawner {
     this.worldHeight = worldHeight;
     this.wave = 0;
     this.waveTimer = CONSTANTS.WAVE_TIMER_INITIAL;
-    this.enemiesRemaining = 0;
     this.spawnQueue = [];
     this.spawnRate = 0.5; // seconds between individual spawns in a wave
     this.spawnTimer = 0;
@@ -1200,32 +1409,81 @@ class Spawner {
     const numChasers = Math.floor(maxWaveSpawn * 0.6);
     const numShooters = maxWaveSpawn - numChasers;
 
-    // Chasers spawn closer, shooters spawn further
-    for (let i = 0; i < maxWaveSpawn; i++) {
-      const isShooter = i >= numChasers;
-      const angle = (Math.PI * 2 * i) / maxWaveSpawn + Math.random() * 0.3;
-      const dist = isShooter ? 400 + Math.random() * 200 : 300 + Math.random() * 150;
-      const sx = playerX + Math.cos(angle) * dist;
-      const sy = playerY + Math.sin(angle) * dist;
-      // Clamp to world
-      const clampedX = Math2.clamp(sx, CONSTANTS.SPAWN_MARGIN, this.worldWidth - CONSTANTS.SPAWN_MARGIN);
-      const clampedY = Math2.clamp(sy, CONSTANTS.SPAWN_MARGIN, this.worldHeight - CONSTANTS.SPAWN_MARGIN);
-      this.spawnQueue.push({
-        x: clampedX,
-        y: clampedY,
-        type: isShooter ? 'shooter' : 'chaser',
-        difficulty: this.wave
-      });
+    // Randomly assign types so shooters are spread across all angles
+    const types = [];
+    for (let i = 0; i < numChasers; i++) types.push('chaser');
+    for (let i = 0; i < numShooters; i++) types.push('shooter');
+    // Fisher-Yates shuffle
+    for (let i = types.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [types[i], types[j]] = [types[j], types[i]];
     }
 
-    this.enemiesRemaining = maxWaveSpawn;
+    for (let i = 0; i < maxWaveSpawn; i++) {
+      const angle = (Math.PI * 2 * i) / maxWaveSpawn + Math.random() * 0.3;
+      const isShooter = types[i] === 'shooter';
+      const dist = isShooter ? 400 + Math.random() * 200 : 300 + Math.random() * 150;
+      // Try to find a spawn position that doesn't overlap obstacles
+      let spawned = false;
+      for (let attempt = 0; attempt < 20 && !spawned; attempt++) {
+        const sx = playerX + Math.cos(angle + (Math.random() - 0.5) * 0.4) * dist;
+        const sy = playerY + Math.sin(angle + (Math.random() - 0.5) * 0.4) * dist;
+        const clampedX = Math2.clamp(sx, CONSTANTS.SPAWN_MARGIN, this.worldWidth - CONSTANTS.SPAWN_MARGIN);
+        const clampedY = Math2.clamp(sy, CONSTANTS.SPAWN_MARGIN, this.worldHeight - CONSTANTS.SPAWN_MARGIN);
+        // Check that this position doesn't overlap any obstacle
+        let clear = true;
+        const spawnRadius = isShooter ? CONSTANTS.ENEMY_SHOOTER_RADIUS : CONSTANTS.ENEMY_CHASER_RADIUS;
+        for (const obs of this.entityManager.obstacles) {
+          if (!obs.active) continue;
+          if (obs.obstacleType === 'circle') {
+            if (Math2.dist(clampedX, clampedY, obs.x, obs.y) < obs.radius + spawnRadius + 5) {
+              clear = false;
+              break;
+            }
+          } else {
+            // For rects, do a simple point-in-rect check in local space
+            const cos = Math.cos(-obs.rotation);
+            const sin = Math.sin(-obs.rotation);
+            const localX = (clampedX - obs.x) * cos - (clampedY - obs.y) * sin;
+            const localY = (clampedX - obs.x) * sin + (clampedY - obs.y) * cos;
+            if (Math.abs(localX) < obs.rectW / 2 + spawnRadius + 5 &&
+                Math.abs(localY) < obs.rectH / 2 + spawnRadius + 5) {
+              clear = false;
+              break;
+            }
+          }
+        }
+        if (clear) {
+          this.spawnQueue.push({
+            x: clampedX,
+            y: clampedY,
+            type: isShooter ? 'shooter' : 'chaser',
+            difficulty: this.wave
+          });
+          spawned = true;
+        }
+      }
+      // If all attempts failed, just use the base position anyway (fallback)
+      if (!spawned) {
+        this.spawnQueue.push({
+          x: Math2.clamp(playerX + Math.cos(angle) * dist,
+            CONSTANTS.SPAWN_MARGIN, this.worldWidth - CONSTANTS.SPAWN_MARGIN),
+          y: Math2.clamp(playerY + Math.sin(angle) * dist,
+            CONSTANTS.SPAWN_MARGIN, this.worldHeight - CONSTANTS.SPAWN_MARGIN),
+          type: isShooter ? 'shooter' : 'chaser',
+          difficulty: this.wave
+        });
+      }
+    }
+
     this.spawnRate = Math.max(0.2, 0.5 - (this.wave - 1) * 0.03);
     this.spawnTimer = 0;
   }
 
   update(dt, player, entityManager) {
-    // If all enemies spawned and all dead, start next wave
-    if (this.spawnQueue.length === 0 && this.enemiesRemaining <= 0) {
+    // If all enemies spawned and all spawned enemies are dead, start next wave
+    const activeEnemies = this.entityManager.enemies.filter(e => e.active).length;
+    if (this.spawnQueue.length === 0 && activeEnemies === 0) {
       this.waveTimer -= dt;
       if (this.waveTimer <= 0) {
         this.startWave(player.x, player.y);
@@ -1249,12 +1507,13 @@ class Spawner {
 
   _spawnEnemy(x, y, type, difficulty, entityManager) {
     const enemy = entityManager.acquireEnemy(x, y, type, difficulty);
-    this.enemiesRemaining--;
     this.totalEnemiesSpawned++;
   }
 
   getEnemiesRemaining() {
-    return this.spawnQueue.length + this.enemiesRemaining;
+    // spawnQueue = enemies not yet spawned
+    // entityManager.enemies = currently active (spawned) enemies
+    return this.spawnQueue.length + this.entityManager.enemies.filter(e => e.active).length;
   }
 
   getWave() {
@@ -1302,6 +1561,360 @@ class Physics {
       }
     }
     return collisions;
+  }
+}
+
+// ============================================================
+// OBSTACLE ENTITY (Step 4)
+// ============================================================
+class Obstacle extends Entity {
+  constructor() {
+    super();
+    this.type = 'obstacle';
+    this.radius = 30;
+    this.active = false;
+    this.obstacleType = 'circle'; // 'circle' or 'rect'
+    // For rectangles
+    this.rectW = 60;
+    this.rectH = 120;
+    this.rotation = 0; // rotation for visual
+  }
+
+  initCircle(x, y, radius) {
+    this.x = x;
+    this.y = y;
+    this.radius = radius;
+    this.obstacleType = 'circle';
+    this.active = true;
+    this.rotation = Math.random() * Math.PI * 2; // visual rotation
+    return this;
+  }
+
+  initRect(x, y, w, h) {
+    this.x = x;
+    this.y = y;
+    this.rectW = w;
+    this.rectH = h;
+    this.obstacleType = 'rect';
+    this.active = true;
+    this.rotation = Math.random() * 0.2 - 0.1; // slight random rotation
+    // Approximate radius for collision
+    this.radius = Math.hypot(w / 2, h / 2);
+    return this;
+  }
+
+  update(dt) {
+    // Static - no movement
+  }
+
+  /** Check circle-circle collision */
+  _circleCollide(other) {
+    return Math2.dist(this.x, this.y, other.x, other.y) < this.radius + other.radius;
+  }
+
+  /** Check circle-rect collision */
+  _circleRectCollide(cx, cy, cr) {
+    // Find closest point on rect to circle center
+    const halfW = this.rectW / 2;
+    const halfH = this.rectH / 2;
+    // Transform circle center to rect's local space
+    const cos = Math.cos(-this.rotation);
+    const sin = Math.sin(-this.rotation);
+    const dx = cx - this.x;
+    const dy = cy - this.y;
+    const localX = dx * cos - dy * sin;
+    const localY = dx * sin + dy * cos;
+
+    // Clamp to rect
+    const closestX = Math2.clamp(localX, -halfW, halfW);
+    const closestY = Math2.clamp(localY, -halfH, halfH);
+
+    // Distance from circle center to closest point
+    const distX = localX - closestX;
+    const distY = localY - closestY;
+    return (distX * distX + distY * distY) < (cr * cr);
+  }
+
+  resolveCollision(other, pushStrength) {
+    if (this.obstacleType === 'circle') {
+      this._resolveCircleCollision(other);
+    } else {
+      this._resolveRectCollision(other);
+    }
+  }
+
+  /** Resolve collision with circle obstacle */
+  _resolveCircleCollision(other) {
+    const dx = other.x - this.x;
+    const dy = other.y - this.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 0.01) return;
+
+    const overlap = (this.radius + other.radius) - dist;
+    if (overlap > 0) {
+      const nx = dx / dist;
+      const ny = dy / dist;
+      other.x += nx * overlap;
+      other.y += ny * overlap;
+      // Bounce: reflect velocity with damping
+      const dot = other.vx * nx + other.vy * ny;
+      if (dot < 0) {
+        other.vx -= (1 + 0.4) * dot * nx;
+        other.vy -= (1 + 0.4) * dot * ny;
+      }
+    }
+  }
+
+  /** Resolve collision with rectangular obstacle */
+  _resolveRectCollision(other) {
+    // Transform circle center to rectangle's local space
+    const cos = Math.cos(-this.rotation);
+    const sin = Math.sin(-this.rotation);
+    const dx = other.x - this.x;
+    const dy = other.y - this.y;
+    const localX = dx * cos - dy * sin;
+    const localY = dx * sin + dy * cos;
+
+    const hw = this.rectW / 2; // half-width
+    const hh = this.rectH / 2; // half-height
+    const cr = other.radius;
+
+    // Check overlap on each of the 4 axes independently
+    let minOverlap = Infinity;
+    let pushX = 0, pushY = 0; // local-space push direction
+
+    // Left wall: x < -hw
+    if (localX < -hw) {
+      const overlap = (hw + cr) - (-localX); // hw + cr + localX
+      if (overlap > 0 && overlap < minOverlap) {
+        minOverlap = overlap;
+        pushX = -1;
+        pushY = 0;
+      }
+    }
+    // Right wall: x > hw
+    if (localX > hw) {
+      const overlap = (hw + cr) - localX;
+      if (overlap > 0 && overlap < minOverlap) {
+        minOverlap = overlap;
+        pushX = 1;
+        pushY = 0;
+      }
+    }
+    // Top wall: y < -hh
+    if (localY < -hh) {
+      const overlap = (hh + cr) - (-localY); // hh + cr + localY
+      if (overlap > 0 && overlap < minOverlap) {
+        minOverlap = overlap;
+        pushX = 0;
+        pushY = -1;
+      }
+    }
+    // Bottom wall: y > hh
+    if (localY > hh) {
+      const overlap = (hh + cr) - localY;
+      if (overlap > 0 && overlap < minOverlap) {
+        minOverlap = overlap;
+        pushX = 0;
+        pushY = 1;
+      }
+    }
+
+    if (minOverlap <= 0) return;
+
+    // Apply push in local space, then transform back to world
+    other.x += pushX * minOverlap * cos - pushY * minOverlap * sin;
+    other.y += pushX * minOverlap * sin + pushY * minOverlap * cos;
+
+    // Transform push normal to world space for velocity reflection
+    const worldNx = pushX * cos - pushY * sin;
+    const worldNy = pushX * sin + pushY * cos;
+
+    // Bounce: reflect velocity along normal with damping
+    const dot = other.vx * worldNx + other.vy * worldNy;
+    if (dot < 0) {
+      other.vx -= (1 + 0.4) * dot * worldNx;
+      other.vy -= (1 + 0.4) * dot * worldNy;
+    }
+  }
+
+  draw(ctx, camera) {
+    if (!this.active) return;
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.rotation);
+
+    if (this.obstacleType === 'circle') {
+      // Asteroid: irregular circle
+      const r = this.radius;
+      ctx.beginPath();
+      const points = 12;
+      for (let i = 0; i <= points; i++) {
+        const angle = (Math.PI * 2 * i) / points;
+        // Irregular radius
+        const noise = 0.85 + 0.15 * Math.sin(i * 3.7 + this.id) * Math.cos(i * 2.3 + this.id * 0.7);
+        const px = Math.cos(angle) * r * noise;
+        const py = Math.sin(angle) * r * noise;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+
+      // Asteroid fill - gray/brown gradient
+      const grad = ctx.createRadialGradient(-r * 0.3, -r * 0.3, 0, 0, 0, r);
+      grad.addColorStop(0, '#777788');
+      grad.addColorStop(0.5, '#555566');
+      grad.addColorStop(1, '#333344');
+      ctx.fillStyle = grad;
+      ctx.fill();
+      ctx.strokeStyle = '#888899';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // Crater details
+      ctx.beginPath();
+      ctx.arc(r * 0.2, -r * 0.1, r * 0.2, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(40, 40, 55, 0.5)';
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(-r * 0.3, r * 0.25, r * 0.15, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(40, 40, 55, 0.4)';
+      ctx.fill();
+
+    } else {
+      // Wall: rectangular structure
+      const w = this.rectW;
+      const h = this.rectH;
+      ctx.beginPath();
+      ctx.rect(-w / 2, -h / 2, w, h);
+
+      // Wall fill - dark metallic
+      const grad = ctx.createLinearGradient(-w / 2, -h / 2, w / 2, h / 2);
+      grad.addColorStop(0, '#2a3a4a');
+      grad.addColorStop(0.5, '#1a2a3a');
+      grad.addColorStop(1, '#2a3a4a');
+      ctx.fillStyle = grad;
+      ctx.fill();
+      ctx.strokeStyle = '#4a6a8a';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // Wall detail lines
+      ctx.strokeStyle = 'rgba(70, 110, 140, 0.3)';
+      ctx.lineWidth = 1;
+      for (let i = -h / 2 + 20; i < h / 2; i += 20) {
+        ctx.beginPath();
+        ctx.moveTo(-w / 2 + 2, i);
+        ctx.lineTo(w / 2 - 2, i);
+        ctx.stroke();
+      }
+    }
+
+    ctx.restore();
+  }
+}
+
+// ============================================================
+// WORLD GENERATOR (Step 4)
+// ============================================================
+class WorldGenerator {
+  constructor(worldWidth, worldHeight) {
+    this.worldWidth = worldWidth;
+    this.worldHeight = worldHeight;
+  }
+
+  /** Generate obstacles and return array */
+  generate() {
+    const obstacles = [];
+    const obstacleCount = CONSTANTS.OBSTACLE_COUNT;
+    const minDist = CONSTANTS.OBSTACLE_MIN_DIST;
+
+    // Try to place circular asteroids
+    for (let i = 0; i < obstacleCount; i++) {
+      let attempts = 0;
+      while (attempts < 50) {
+        const radius = Math2.rand(CONSTANTS.OBSTACLE_MIN_RADIUS, CONSTANTS.OBSTACLE_MAX_RADIUS);
+        const x = Math2.rand(radius + 50, this.worldWidth - radius - 50);
+        const y = Math2.rand(radius + 50, this.worldHeight - radius - 50);
+
+        // Keep away from center (player spawn)
+        const dx = x - this.worldWidth / 2;
+        const dy = y - this.worldHeight / 2;
+        if (Math.hypot(dx, dy) < minDist) {
+          attempts++;
+          continue;
+        }
+
+        // Check distance from other obstacles
+        let tooClose = false;
+        for (const obs of obstacles) {
+          const d = Math2.dist(x, y, obs.x, obs.y);
+          if (d < obs.radius + radius + 30) {
+            tooClose = true;
+            break;
+          }
+        }
+
+        if (!tooClose) {
+          const obs = new Obstacle();
+          obs.initCircle(x, y, radius);
+          obstacles.push(obs);
+          break;
+        }
+        attempts++;
+      }
+    }
+
+    // Generate wall structures
+    const wallCount = CONSTANTS.WALL_COUNT;
+    for (let i = 0; i < wallCount; i++) {
+      let attempts = 0;
+      while (attempts < 50) {
+        const w = CONSTANTS.WALL_WIDTH;
+        const h = Math2.rand(CONSTANTS.WALL_LENGTH_MIN, CONSTANTS.WALL_LENGTH_MAX);
+        const x = Math2.rand(w + 50, this.worldWidth - w - 50);
+        const y = Math2.rand(h + 50, this.worldHeight - h - 50);
+
+        // Keep away from center
+        const dx = x - this.worldWidth / 2;
+        const dy = y - this.worldHeight / 2;
+        if (Math.hypot(dx, dy) < minDist * 1.2) {
+          attempts++;
+          continue;
+        }
+
+        // Check distance from other obstacles
+        let tooClose = false;
+        for (const obs of obstacles) {
+          let d;
+          if (obs.obstacleType === 'circle') {
+            d = Math2.dist(x, y, obs.x, obs.y);
+            if (d < obs.radius + Math.hypot(w / 2, h / 2) + 40) {
+              tooClose = true;
+              break;
+            }
+          } else {
+            // rect-rect-ish check
+            d = Math2.dist(x, y, obs.x, obs.y);
+            if (d < Math.hypot(w / 2, h / 2) + obs.radius + 40) {
+              tooClose = true;
+              break;
+            }
+          }
+        }
+
+        if (!tooClose) {
+          const obs = new Obstacle();
+          obs.initRect(x, y, w, h);
+          obstacles.push(obs);
+          break;
+        }
+        attempts++;
+      }
+    }
+
+    return obstacles;
   }
 }
 
@@ -1397,8 +2010,11 @@ class Game {
     this.input = new InputManager(this.canvas);
     this.entityManager = new EntityManager();
     this.player = new Player(this.input, this.camera);
+    this.player.game = this;
     this.weapon = new Weapon('laser');
     this.spawner = new Spawner(this.entityManager, CONSTANTS.WORLD_WIDTH, CONSTANTS.WORLD_HEIGHT);
+    this.worldGen = new WorldGenerator(CONSTANTS.WORLD_WIDTH, CONSTANTS.WORLD_HEIGHT);
+    this.obstacles = []; // populated on start/restart
 
     this.running = false;
     this.state = GameState.PLAYING;
@@ -1451,6 +2067,12 @@ class Game {
     game = this; // Global ref for enemy callbacks
     this.running = true;
     this.lastTime = performance.now();
+    // Generate world obstacles
+    this.obstacles = this.worldGen.generate();
+    for (const obs of this.obstacles) {
+      this.entityManager.obstacles.push(obs);
+      this.entityManager.allEntities.push(obs);
+    }
     // Start first wave
     this.spawner.startWave(this.player.x, this.player.y);
     this._loop(this.lastTime);
@@ -1469,6 +2091,14 @@ class Game {
     this.player.maxHp = CONSTANTS.PLAYER_MAX_HP;
     this.player.rotation = 0;
     this.player.active = true;
+    this.player.game = this;
+
+    // Generate world obstacles
+    this.obstacles = this.worldGen.generate();
+    for (const obs of this.obstacles) {
+      this.entityManager.obstacles.push(obs);
+      this.entityManager.allEntities.push(obs);
+    }
 
     // Reset spawner
     this.spawner = new Spawner(this.entityManager, CONSTANTS.WORLD_WIDTH, CONSTANTS.WORLD_HEIGHT);
@@ -1534,6 +2164,9 @@ class Game {
     // Update spawner (spawn enemies)
     this.spawner.update(dt, this.player, this.entityManager);
 
+    // Build spatial grid for broad-phase collision
+    this.entityManager.buildSpatialGrid();
+
     // Update entities
     this.entityManager.update(dt);
 
@@ -1547,6 +2180,21 @@ class Game {
   _handleCollisions() {
     const projectiles = this.entityManager.getAllOfType('projectile');
     const enemies = this.entityManager.getAllOfType('enemy');
+    const obstacles = this.entityManager.obstacles;
+
+    // Projectile vs Obstacle (bullets destroyed on impact)
+    for (const proj of projectiles) {
+      if (!proj.active) continue;
+
+      for (const obs of obstacles) {
+        if (!obs.active) continue;
+        if (proj.collidesWithObstacle(obs)) {
+          proj.active = false;
+          this.entityManager.releaseProjectile(proj);
+          break;
+        }
+      }
+    }
 
     // Projectile vs Enemy (player bullets hit enemies)
     for (const proj of projectiles) {
@@ -1620,7 +2268,16 @@ class Game {
     // Draw game objects with camera transform
     ctx.save();
     camera.apply(ctx);
+
+    // Draw obstacles first (background layer)
+    for (const obs of this.entityManager.obstacles) {
+      if (obs.active) obs.draw(ctx, camera);
+    }
+
+    // Draw enemies and projectiles
     this.entityManager.draw(ctx, camera);
+
+    // Draw player on top
     if (this.player.active) {
       this.player.draw(ctx, camera);
     }
@@ -1668,6 +2325,16 @@ class Game {
       ctx.beginPath();
       ctx.arc(ex, ey, 2, 0, Math.PI * 2);
       ctx.fill();
+    }
+
+    // Obstacle dots
+    for (const obs of this.entityManager.obstacles) {
+      if (!obs.active) continue;
+      const ox = mapX + obs.x * scaleX;
+      const oy = mapY + obs.y * scaleY;
+      ctx.fillStyle = 'rgba(150, 150, 170, 0.5)';
+      const obsSize = Math.max(2, obs.radius * scaleX * 2);
+      ctx.fillRect(ox - obsSize / 2, oy - obsSize / 2, obsSize, obsSize);
     }
 
     // Camera view rect
