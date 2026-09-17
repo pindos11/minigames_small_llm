@@ -183,6 +183,112 @@ Pickup calls: `player.upgrades.push(UpgradePool[name]);`
 
 **That's it.** No switch, no enum, no refactoring existing code.
 
+## 2.1 Survivors-Style Evolution — Additive Phase (no rewrite)
+
+The current game already has the useful core of a survivors-style game: continuous
+movement and shooting, enemy pressure, escalating waves, drops, and stacking
+power. This phase changes the *feel and content density*, not the foundations.
+
+**Keep as-is:** the canvas/rendering path, input, player movement and aiming,
+entity pools, collision system, enemy waves, asteroids, health drops, current HUD,
+and the four working upgrades. New work plugs into the existing `UpgradePool`,
+`Player.upgrades`, bullet spawn, bullet tick, and pickup collection paths.
+
+**Fix before extending:** first correct any behaviour where an upgrade hook is run
+twice for one shot, make pickup collection reliably call one central
+`player.addUpgrade(id)` entry point, and reset upgrade state on restart. These are
+small correctness fixes, not an architectural redo.
+
+### Upgrade state: levels plus derived effects
+
+For a larger catalogue, retain the existing upgrade objects but store ownership by
+ID and level instead of relying only on a growing list of duplicate objects:
+
+```js
+player.upgradeLevels = { multishot: 2, rapidfire: 1 };
+
+player.addUpgrade = function(id) {
+  const def = UpgradePool[id];
+  const level = this.upgradeLevels[id] || 0;
+  if (!def || level >= def.maxLevel) return false;
+  this.upgradeLevels[id] = level + 1;
+  def.applyLevel?.(this, level + 1);
+  return true;
+};
+```
+
+Existing `apply`, `bulletMod`, `onBulletTick`, `onHit`, and `onBulletHit` hooks stay
+valid. The level is simply passed into them (or read from `upgradeLevels`). Rebuild
+only cheap derived values after a pickup—damage, cooldown, projectile count,
+magnet radius—rather than mutating them indefinitely. A fired bullet receives its
+final static spec once; only effects that genuinely change while flying use a
+per-bullet tick hook.
+
+### Drops and run pacing
+
+An enemy chooses the upgrade ID when it dies and stores it in the pickup. Collection
+does not reroll it. Roll from a weighted table, excluding upgrades already at their
+`maxLevel`; later waves can add rare effects or raise their weight. This keeps a
+physical-pickup game legible while preventing wasted max-level drops.
+
+This game need not add a level-up choice screen. Random drops preserve the intended
+"adapt to what appears" survivors variant. If a choice screen is ever desired, it
+can be an optional alternate pickup rule, not a replacement for the systems below.
+
+### Ten sample upgrade variants
+
+These are deliberately mixed: several reinforce the existing weapon, several make
+survival and positioning matter, and a few create new behaviours. Add them one at a
+time and test each in isolation.
+
+| ID | Max | Effect per level | Existing integration point |
+|---|---:|---|---|
+| `multishot` | 5 | One additional shot or a wider controlled spread. | Existing fire/spawn modifier |
+| `rapidfire` | 6 | Lower cooldown with a safe minimum cap. | Existing player/weapon cooldown stat |
+| `damage_amp` | 8 | Flat or percentage projectile damage. | Existing bullet spec |
+| `curved_bullets` | 3 | Increase curve strength; use a stable turn-rate cap. | Existing `onBulletTick` |
+| `piercing` | 4 | Bullet survives N enemy hits; track hit IDs so it cannot hit the same enemy repeatedly. | Bullet collision result |
+| `homing_bullets` | 3 | Gently steer toward the nearest valid enemy within a radius. | `onBulletTick` + enemy query |
+| `explosive_rounds` | 3 | On hit, deal an area burst with a radius and damage multiplier. | `onBulletHit` + existing FX/collision helpers |
+| `shield` | 4 | Add rechargeable shield points before hull HP; recharge only after no recent hit. | Existing player damage path / `onHit` |
+| `magnet_core` | 5 | Expand pickup attraction radius and pull strength. | Existing pickup magnet update |
+| `combat_drone` | 2 | Spawn one, then improve one companion that targets and fires at enemies. | New pooled companion entity, updated alongside player |
+
+The first four remain the present implementation. `piercing` and `homing_bullets`
+extend the present projectile pipeline. `explosive_rounds`, `shield`, and
+`magnet_core` reuse collision, damage, FX, and pickup code already present. Only
+`combat_drone` adds a small new pooled entity type; it should follow the same pool
+pattern as enemies and bullets.
+
+### Interaction rules that stay understandable
+
+- Define stacking in each upgrade definition: `maxLevel`, cap, and whether each
+  level is additive, multiplicative, or unlock-only.
+- Give projectiles lightweight tags such as `laser`, `homing`, `piercing`, and
+  `explosive`. Effects check tags rather than adding one-off pairwise special cases.
+- Order operations consistently: base projectile -> static stat modifiers -> extra
+  projectiles -> dynamic flight effects -> hit effects. Document any exception.
+- Put cross-upgrade synergies behind explicit conditions. For example, an optional
+  later upgrade could make explosive rounds seek targets; neither base upgrade
+  needs to name the other.
+- Cap expensive work: homing searches use the existing spatial grid, explosions
+  query a local radius, and drones have a firing cooldown.
+
+### Incremental implementation order
+
+1. Make the small upgrade/reset/pickup correctness fixes above and expose upgrade
+   level in the existing HUD tags.
+2. Add the level map, weighted drop table, max-level exclusion, and four stat or
+   projectile upgrades (`piercing`, `homing_bullets`, `shield`, `magnet_core`).
+3. Add `explosive_rounds`, then verify its area damage and pooled FX under a dense
+   wave.
+4. Add `combat_drone` last, only after the generic pools and target query are
+   confirmed stable.
+
+At every point the game remains playable. None of these steps require converting to
+an ECS, replacing the renderer, recreating pools, or changing completed wave and
+collision work.
+
 ---
 
 ## 3. Implementation Plan (7 Steps)

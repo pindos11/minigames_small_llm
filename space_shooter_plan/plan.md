@@ -19,7 +19,7 @@
 │  ┌────▼────────────────▼────────────────────▼─────────┐  │
 │  │                    World (spatial grid)            │  │
 │  │  ┌────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐  │  │
-│  │  │Player  │ │  Enemy   │ │ Projectile││ Pickup │  │  │
+│  │  │Player  │ │  Enemy   │ │ Projectile││ Health │  │  │
 │  │  │  Ship  │ │  Entities│ │  Entities ││ Entities│  │  │
 │  │  └────────┘ └──────────┘ └──────────┘ └────────┘  │  │
 │  │  ┌──────────────────────────────────────────────┐  │  │
@@ -48,9 +48,9 @@
 | **World** | Static obstacle map, boundaries, spatial grid |
 | **Camera** | Follows player with configurable offset, smoothing, screen bounds |
 | **Physics** | Velocity, friction, acceleration, circle-rect & circle-circle collision |
-| **Spawner** | Wave logic, difficulty curve, enemy/pickup/obstacle spawning |
+| **Spawner** | Wave logic, difficulty curve, enemy/optional-health/obstacle spawning |
 | **Renderer** | Canvas drawing, camera matrix, sprites/particles |
-| **UpgradeSystem** | Composable ability graph (see §2) |
+| **UpgradeSystem** | Wave-end choices, build state, and data-driven effects (see §2) |
 | **AudioManager** | (Future) procedural SFX via Web Audio |
 
 ### Entity Base (all inherit from this)
@@ -66,100 +66,95 @@ class Entity {
 
 ---
 
-## 2. Upgrade System Design — Composable & Extensible
+## 2. Survivors-Style Build System — Wave-End Choices
 
 ### Core Principle
 
-> **Upgrades are *modifiers* that compose onto a `Weapon` object.**  
-> A weapon starts with a base behavior. Each upgrade adds a *behavior layer* — they stack without replacing each other.
+> **The player creates a build by choosing one of three upgrades after each completed wave.**
+> Enemies do not need to drop weapon upgrades. The existing shooting, enemy, wave, obstacle, collision, and HUD systems remain intact; the new system only supplies derived values and behavior flags to them.
 
-### Data Model
+The player starts every run with the already implemented laser. Upgrades strengthen that laser, improve survivability, or add projectile behavior. A selection pauses the action between waves, so the player can make a deliberate build decision instead of chasing random power-up drops.
 
-```
-Player
- └── weapons[]       (list, supports multi-slot)
-      └── baseType: "laser" | "missile" | "blaster"
-      └── upgrades: [UpgradeRef, ...]   (stackable, order matters)
-```
+### Build State and Derived Stats
 
-Each `UpgradeRef` = `{ id, level, duration? }`
-
-### Upgrade Interface
+Store only the level selected for each upgrade. Recalculate gameplay stats from that state whenever the player chooses an upgrade. Recalculation is deterministic: it avoids bugs caused by permanently mutating weapon values in an unclear order.
 
 ```js
-class Upgrade {
-  id              // unique slug
-  name            // display name
-  description     // tooltip
-  icon            // emoji or sprite
-  stackable       // can have multiple levels?
-  
-  // Called when attached to a weapon — returns modifier functions
-  apply(weapon) {
-    return {
-      onCreate(projectile) { /* mutate projectile properties */ },
-      onUpdate(projectile, dt) { /* modify behavior each frame */ },
-      onFire(player, weapon) { /* custom fire logic, e.g. spread */ },
-      draw(projectile, ctx) { /* custom render override */ }
-    }
-  }
-}
+player.upgradeLevels = { damage: 2, multishot: 1, pierce: 0 };
+
+player.stats = {
+  damageMultiplier: 1.5,
+  fireCooldown: 0.12,
+  projectileSpeed: 500,
+  extraShots: 1,
+  spread: 0.16,
+  pierce: 0,
+  homingStrength: 0,
+  maxHpBonus: 0,
+  moveSpeedMultiplier: 1,
+};
 ```
 
-### Composition Example
+`Weapon.fire()` reads the relevant derived stats when it creates projectiles. Projectiles copy the values they need (`damage`, `pierce`, `homingStrength`, and so on) on spawn. Exceptional mechanics such as homing or explosions use a small, reusable behavior check in the projectile/update/collision code—not a bespoke rewrite of the weapon for every upgrade.
+
+### Upgrade Registry
+
+All content belongs in one data registry. Adding or balancing an ordinary upgrade means editing this data, not adding another chain of `if` statements.
 
 ```js
-// Base weapon: straight laser, 1 bullet/frame
-const laser = new Weapon('laser', { damage: 10, speed: 400, rate: 0.15 })
-
-// Add upgrades (composable layers)
-laser.add(new MultiShot({ count: 3, spread: 0.2 }))
-laser.add(new CurveBullets({ radius: 150, direction: 1 }))
-laser.add(new Piercing({ levels: 3 }))
-laser.add(new Homing({ strength: 50 }))
-
-// Execution order during fire:
-// 1. Weapon.onFire() → calls each upgrade.onFire() in order
-// 2. Weapon creates projectiles
-// 3. Each projectile runs upgrade.onCreate(projectile)
-// 4. Each frame: upgrade.onUpdate(projectile, dt) in order
-// 5. Rendering: upgrade.draw() if provided, else default
+const UPGRADES = {
+  damage: {
+    name: 'Overcharged Laser', maxLevel: 5, weight: 10,
+    levels: [{ damageMultiplier: 1.20 }, { damageMultiplier: 1.20 }]
+  },
+  multishot: {
+    name: 'Split Beam', maxLevel: 3, weight: 7,
+    levels: [{ extraShots: 1, spread: 0.14 }]
+  },
+  // ...the remaining entries use the same shape
+};
 ```
 
-### Upgrade Registry (for easy extension)
+Each entry may contain `id`, `name`, `description`, `icon`, `maxLevel`, `weight`, optional `requires`, and per-level effects. An upgrade is eligible when it is not maxed and its prerequisites are met.
 
-```js
-const UPGRADE_REGISTRY = {
-  'multishot': MultiShot,
-  'curve': CurveBullets,
-  'pierce': Piercing,
-  'homing': Homing,
-  'rapidfire': RapidFire,
-  'spread': SpreadShot,
-  'explosion': ExplosionOnDeath,
-  // ... add new ones here, no code changes elsewhere
-}
+### Initial Catalogue — 10 Sample Upgrade Variants
+
+| ID | Upgrade | Levels | Effect / role |
+|---|---|---:|---|
+| `damage` | Overcharged Laser | 5 | Raises projectile damage. Reliable general-purpose scaling. |
+| `rapidFire` | Cooling Vents | 5 | Reduces fire cooldown; keeps the existing firing mechanic, just faster. |
+| `multishot` | Split Beam | 3 | Adds side projectiles with controlled spread. |
+| `pierce` | Phase Rounds | 4 | Lets a projectile damage additional enemies before despawning. |
+| `projectileSpeed` | Particle Accelerator | 3 | Raises projectile speed and effective range/accuracy. |
+| `homing` | Targeting Array | 3 | Gives spawned projectiles a gentle turn toward nearby enemies. |
+| `explosion` | Volatile Core | 3 | Projectiles explode on death/hit, damaging enemies in a radius. Requires `pierce` level 1. |
+| `maxHp` | Reinforced Hull | 3 | Increases maximum HP and immediately grants the gained HP. |
+| `armor` | Deflector Plating | 3 | Reduces incoming damage by a small flat amount or percentage. |
+| `thrusters` | Ion Thrusters | 3 | Increases player acceleration and/or maximum speed for safer positioning. |
+
+The first six create the main offensive build paths. The last three ensure that a difficult wave can still offer a meaningful defensive or movement choice. `explosion` illustrates a prerequisite-driven synergy without forcing a complex ability graph.
+
+### Wave-End Offer Flow
+
+```
+wave cleared
+  → stop spawning and remove remaining enemy projectiles
+  → game state: "upgrade_select" (game simulation paused)
+  → filter eligible upgrades; choose 3 distinct weighted offers
+  → player clicks/taps one card
+  → increment its level; rebuild player.stats
+  → begin the next wave
 ```
 
-### Pickups & Upgrade Distribution
+Offers never contain an upgrade that has reached `maxLevel`. Weights can later make rare/strong options less common, and the selection code should draw without replacement so no card is repeated in one choice screen. Health may remain a rare enemy drop or be awarded as a small between-wave recovery, but it is separate from build upgrades.
 
-| Pickup ID | Effect |
-|---|---|
-| `health` | Restore HP |
-| `upgrade_random` | Give player a random upgrade from `UPGRADE_REGISTRY` |
-| `upgrade_[id]` | Give specific upgrade |
-| `weapon_swap` | Swap base weapon type |
-| `shield` | Temporary damage immunity |
+### Interaction Rules
 
-Pickups drop as entities with a `dropType` field. Player pickup collects and triggers `Game.applyPickup(dropType)`.
-
-### Why This Is Composable
-
-1. **Order-independent** — each upgrade mutates the projectile independently; chaining is explicit.
-2. **Additive** — `MultiShot` + `Curve` = 3 curved bullets, not a replacement.
-3. **Zero-cost** — upgrades with no `onUpdate`/`draw` hooks have negligible overhead.
-4. **Extensible** — new upgrade = new class + one registry entry. No switch/if chains.
-5. **Time-limited upgrades** — `duration` field + timer in `Weapon` for power-up style effects.
+1. **Stat upgrades combine predictably.** Add flat values first, then multiply where needed; document the formula in `rebuildPlayerStats()`.
+2. **Projectile behavior is field-based.** A projectile with `pierce: 2` and `homingStrength: 40` simply uses both checks during its lifetime.
+3. **Event effects stay small and generic.** For example, the collision code checks `explosionRadius > 0` and calls one shared area-damage helper.
+4. **Order does not affect the build.** Selecting damage before multishot produces the same result as selecting multishot before damage.
+5. **Keep the catalogue data-driven.** A new numerical upgrade should normally require one registry entry; add code only when it introduces a truly new behavior.
 
 ---
 
@@ -234,34 +229,35 @@ Pickups drop as entities with a `dropType` field. Player pickup collects and tri
 
 ---
 
-### Step 5 — Pickups & Health System
-**Goal:** Enemies drop health and upgrade pickups when destroyed.
+### Step 5 — Wave Completion & Upgrade Selection
+**Goal:** Turn the existing wave transition into a survivors-style pause-and-choose build loop, without changing any completed gameplay systems.
 
 | What | Details |
 |---|---|
-| `Pickup` entity | Type, position, lifetime (despawn timer), glow animation |
-| Drop logic | `enemy.onDeath() → spawnPickup(enemy.pos)` |
-| Player pickups | Circle overlap check, apply effect |
-| Health/HP system | Player HP bar, death condition, respawn / game over |
-| Pickup types | `health`, `upgrade_random` (placeholder for now) |
+| Wave-clear detection | Reuse the existing spawner/enemy count; when a wave has spawned and no enemies remain, enter `upgrade_select`. |
+| Game state | Add `playing → upgrade_select → playing`; pause movement, collisions, firing, and spawning while choosing. |
+| Upgrade overlay | Three clickable/tappable cards: icon, name, current/next level, concise effect description. |
+| Offer generator | Filter non-maxed, prerequisite-satisfied upgrades; choose 3 distinct weighted entries. |
+| Apply choice | Increment `player.upgradeLevels[id]`, call `rebuildPlayerStats()`, hide the overlay, start the next wave. |
+| Health between waves | Optional small heal or rare health drop only; it is not part of the upgrade selection system. |
 
-**Deliverable:** Enemies explode, drop pickups. Player collects health/upgrade pickups. HP bar UI.
+**Deliverable:** Completing a wave presents three upgrade choices and begins the next wave after one selection. Steps 1–4 require no redesign or replacement.
 
 ---
 
-### Step 6 — Composable Upgrade System
-**Goal:** Implement the full upgrade architecture from §2.
+### Step 6 — Data-Driven Upgrades & Projectile Behaviors
+**Goal:** Implement the 10-entry catalogue from §2 through derived player stats and a few generic projectile fields.
 
 | What | Details |
 |---|---|
-| `Upgrade` base class + interface | As specified in §2 |
-| `Weapon` upgrade slots | `addUpgrade()`, `removeUpgrade()`, composition chain |
-| Built-in upgrades | `MultiShot`, `CurveBullets`, `Piercing` (3 to start) |
-| `UPGRADE_REGISTRY` | Central map for spawn-from-pickup |
-| Pickup integration | `applyPickup('upgrade_random')` picks from registry |
-| Time-limited upgrades | Duration tracking, auto-remove |
+| `UPGRADES` registry | Data definitions for the 10 sample upgrades, levels, weights, descriptions, and prerequisites. |
+| Build state | `player.upgradeLevels` plus `rebuildPlayerStats()`; rebuild from base values after every choice. |
+| Weapon integration | Read damage, cooldown, projectile speed, extra shots, and spread from `player.stats`; preserve the current `Weapon` and projectile pool. |
+| Projectile fields | Add `pierce`, `homingStrength`, and `explosionRadius` with safe base values of zero. |
+| Reusable effects | Implement generic homing steering, pierce decrement on enemy hit, and an area-damage helper for explosions. |
+| Build HUD | Show selected upgrades and levels in a compact panel; useful for testing and later polish. |
 
-**Deliverable:** Player can collect upgrades that stack compositely on weapons.
+**Deliverable:** A run can form distinct damage, rapid-fire, spread, piercing, homing, explosive, durable, or mobile builds, while retaining all existing controls, enemies, obstacles, spatial hashing, and collision code.
 
 ---
 
@@ -270,16 +266,16 @@ Pickups drop as entities with a `dropType` field. Player pickup collects and tri
 
 | What | Details |
 |---|---|
-| Particles | Death explosions, engine thrust trails, pickup glow |
+| Particles | Death explosions, engine thrust trails, upgrade-card/pickup glow |
 | Visual effects | ~~Screen shake on hit~~, ~~damage flash~~, ~~game over / restart~~, ~~minimap~~, ~~wave HUD~~, weapon-specific bullet effects |
-| UI | ~~Score~~, ~~HP bar~~, weapon indicator, upgrade inventory panel |
+| UI | ~~Score~~, ~~HP bar~~, weapon indicator, wave-end upgrade cards, upgrade inventory panel |
 | Waves / Difficulty | ~~Progressive enemy count~~, ~~speed~~, ~~HP scaling~~ |
-| Game states | ~~Playing~~ → ~~Game Over~~ → Restart |
-| Audio | Web Audio API: shoot, hit, explosion, pickup SFX (procedural) |
+| Game states | ~~Playing~~ → Upgrade Select → ~~Game Over~~ → Restart |
+| Audio | Web Audio API: shoot, hit, explosion, wave-clear, upgrade-select SFX (procedural) |
 | Performance | ~~Object pooling~~, batch rendering, `will-change` optimization |
 
 > **Partially done in Step 3:** screen shake, damage flash, game over state, restart, wave system, HUD, minimap.
-> **Remaining:** particles (explosions, trails), audio, upgrade inventory panel, weapon-specific bullet effects.
+> **Remaining:** wave-end upgrade selection, particles (explosions, trails), audio, upgrade inventory panel, weapon-specific bullet effects.
 
 **Deliverable:** Complete, polished game loop. Restartable. Good UX.
 
@@ -294,9 +290,9 @@ space_shooter.html
 │   ├── constants.js        (canvas size, physics params, colors)
 │   ├── math.js             (vec2 utilities, collision helpers)
 │   ├── input.js            (Keyboard + Mouse + Touch)
-│   ├── entities.js         (Entity, Player, Enemy, Projectile, Pickup, Obstacle)
-│   ├── weapon.js           (Weapon + Upgrade system)
-│   ├── upgrades.js         (Specific upgrade classes)
+│   ├── entities.js         (Entity, Player, Enemy, Projectile, optional Health, Obstacle)
+│   ├── weapon.js           (Weapon reads derived build stats)
+│   ├── upgrades.js         (UPGRADES data registry + rebuildPlayerStats)
 │   ├── world.js            (Spawner, Obstacles, spatial grid)
 │   ├── camera.js           (Camera follow logic)
 │   ├── renderer.js         (Drawing + particles)
@@ -316,7 +312,7 @@ space_shooter.html
 | Canvas 2D over WebGL | Simpler, sufficient for 2D, smaller codebase |
 | Object pooling for entities | Prevents GC stalls during intense firefights |
 | Spatial hash grid | O(1) collision broad-phase vs O(n²) brute force |
-| Upgrade modifiers, not replacements | Enables crazy combos (e.g. 5-way homing curved spread) |
+| Data-driven wave-end upgrades | Scales a survivors-style build without replacing implemented combat systems |
 | Fixed timestep + delta interpolation | Consistent physics across frame rates |
 | Touch joystick for mobile | Familiar gamepad-like control on phones |
 
