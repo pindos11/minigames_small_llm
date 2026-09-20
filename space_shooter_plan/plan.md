@@ -158,7 +158,7 @@ Offers never contain an upgrade that has reached `maxLevel`. Weights can later m
 
 ---
 
-## 3. Step-by-Step Implementation Plan (7 Steps)
+## 3. Step-by-Step Implementation Plan (9 Steps)
 
 ### Step 1 — Foundation: Game Loop, Input, Camera, Player Ship ✅ DONE
 **Goal:** A ship that responds to WASD (with inertia), mouse aiming, and touches. Camera follows smoothly.
@@ -229,39 +229,67 @@ Offers never contain an upgrade that has reached `maxLevel`. Weights can later m
 
 ---
 
-### Step 5 — Wave Completion & Upgrade Selection
-**Goal:** Turn the existing wave transition into a survivors-style pause-and-choose build loop, without changing any completed gameplay systems.
+### Step 5 — Wave-Clear State & Transition Gate
+**Goal:** Establish a reliable pause point between waves, without yet adding upgrade content or UI.
 
 | What | Details |
 |---|---|
-| Wave-clear detection | Reuse the existing spawner/enemy count; when a wave has spawned and no enemies remain, enter `upgrade_select`. |
-| Game state | Add `playing → upgrade_select → playing`; pause movement, collisions, firing, and spawning while choosing. |
-| Upgrade overlay | Three clickable/tappable cards: icon, name, current/next level, concise effect description. |
-| Offer generator | Filter non-maxed, prerequisite-satisfied upgrades; choose 3 distinct weighted entries. |
-| Apply choice | Increment `player.upgradeLevels[id]`, call `rebuildPlayerStats()`, hide the overlay, start the next wave. |
-| Health between waves | Optional small heal or rare health drop only; it is not part of the upgrade selection system. |
+| Wave-clear detection | Reuse the existing spawner/enemy count; when a fully spawned wave has no enemies remaining, emit one wave-clear event. |
+| State transition | Add `playing → upgrade_select`; prevent the spawner from automatically starting the next wave. |
+| Simulation pause | While in `upgrade_select`, pause movement, collisions, firing, enemy projectiles, and spawning. |
+| Temporary feedback | Show a minimal “Wave Clear — choose an upgrade” prompt so the state can be verified before the card UI exists. |
+| Transition safety | Guard against duplicate wave-clear events and reset the gate on restart. |
 
-**Deliverable:** Completing a wave presents three upgrade choices and begins the next wave after one selection. Steps 1–4 require no redesign or replacement.
+**Deliverable:** Clearing a wave reliably freezes gameplay at one explicit between-wave state; Steps 1–4 need no redesign or replacement.
 
 ---
 
-### Step 6 — Data-Driven Upgrades & Projectile Behaviors
-**Goal:** Implement the 10-entry catalogue from §2 through derived player stats and a few generic projectile fields.
+### Step 6 — Upgrade Data, Build State & Offers
+**Goal:** Create the data model that can generate a valid choice without directly mutating gameplay values.
 
 | What | Details |
 |---|---|
-| `UPGRADES` registry | Data definitions for the 10 sample upgrades, levels, weights, descriptions, and prerequisites. |
-| Build state | `player.upgradeLevels` plus `rebuildPlayerStats()`; rebuild from base values after every choice. |
+| `UPGRADES` registry | Define the 10 sample upgrades, their levels, weights, descriptions, and prerequisites. |
+| Build state | Add `player.upgradeLevels` and `rebuildPlayerStats()`; rebuild from base values after every choice. |
+| Eligibility | Filter upgrades that are maxed or have unmet prerequisites. |
+| Offer generator | Select three distinct eligible upgrades by weight, without replacement; handle a smaller eligible pool gracefully. |
+| Choice contract | Represent an offer as an upgrade ID plus its current and next level/effect, ready for a UI to render. |
+
+**Deliverable:** At a wave-clear state, the game can produce a deterministic, valid set of upgrade offers from a single registry.
+
+---
+
+### Step 7 — Upgrade Selection UI & Wave Resume
+**Goal:** Let the player choose an offered upgrade by mouse or touch, then safely begin the next wave.
+
+| What | Details |
+|---|---|
+| Upgrade overlay | Render up to three clickable/tappable cards with icon, name, current/next level, and concise effect text. |
+| Input routing | Enable card input only in `upgrade_select`; prevent click/tap events from also firing the weapon. |
+| Apply choice | Increment `player.upgradeLevels[id]`, call `rebuildPlayerStats()`, and refresh any relevant HUD state. |
+| Resume | Hide the overlay, clear the temporary transition state, and explicitly start the next wave. |
+| Health between waves | Optionally grant a small heal or retain rare health drops; neither is an upgrade-card choice. |
+
+**Deliverable:** Completing a wave presents valid choices; selecting one applies it once and starts the next wave.
+
+---
+
+### Step 8 — Weapon Stats, Projectile Behaviors & Build HUD
+**Goal:** Connect the derived build state to combat through generic, composable projectile mechanics.
+
+| What | Details |
+|---|---|
 | Weapon integration | Read damage, cooldown, projectile speed, extra shots, and spread from `player.stats`; preserve the current `Weapon` and projectile pool. |
 | Projectile fields | Add `pierce`, `homingStrength`, and `explosionRadius` with safe base values of zero. |
 | Reusable effects | Implement generic homing steering, pierce decrement on enemy hit, and an area-damage helper for explosions. |
-| Build HUD | Show selected upgrades and levels in a compact panel; useful for testing and later polish. |
+| Defensive and movement stats | Apply max-HP, armor, and thruster effects through the same derived-stat rebuild. |
+| Build HUD | Show selected upgrades and levels in a compact panel for gameplay clarity and testing. |
 
-**Deliverable:** A run can form distinct damage, rapid-fire, spread, piercing, homing, explosive, durable, or mobile builds, while retaining all existing controls, enemies, obstacles, spatial hashing, and collision code.
+**Deliverable:** Runs can form distinct damage, rapid-fire, spread, piercing, homing, explosive, durable, or mobile builds while retaining the existing combat systems.
 
 ---
 
-### Step 7 — Polish & Meta-Game
+### Step 9 — Polish & Meta-Game
 **Goal:** Visual polish, audio, UI, difficulty scaling, restart.
 
 | What | Details |

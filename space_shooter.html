@@ -1396,6 +1396,8 @@ class Spawner {
     this.spawnRate = 0.5; // seconds between individual spawns in a wave
     this.spawnTimer = 0;
     this.totalEnemiesSpawned = 0;
+    this.waveCleared = false; // set true when wave is fully cleared (no spawn queue + no active enemies)
+    this.onWaveCleared = null; // callback set by Game to handle the transition
   }
 
   startWave(playerX, playerY) {
@@ -1481,14 +1483,16 @@ class Spawner {
   }
 
   update(dt, player, entityManager) {
-    // If all enemies spawned and all spawned enemies are dead, start next wave
+    // If in upgrade_select state, do nothing — the Game class controls resuming
+    if (this.waveCleared) return;
+
+    // If all enemies spawned and all spawned enemies are dead, wave is cleared
+    // But only if at least one wave has started (wave > 0) to avoid triggering on init
     const activeEnemies = this.entityManager.enemies.filter(e => e.active).length;
-    if (this.spawnQueue.length === 0 && activeEnemies === 0) {
-      this.waveTimer -= dt;
-      if (this.waveTimer <= 0) {
-        this.startWave(player.x, player.y);
-        this.waveTimer = Math.max(CONSTANTS.WAVE_TIMER_MIN,
-          CONSTANTS.WAVE_TIMER_INITIAL - (this.wave - 1) * CONSTANTS.WAVE_TIMER_DECREASE);
+    if (this.wave > 0 && this.spawnQueue.length === 0 && activeEnemies === 0) {
+      this.waveCleared = true;
+      if (this.onWaveCleared) {
+        this.onWaveCleared();
       }
       return;
     }
@@ -1518,6 +1522,25 @@ class Spawner {
 
   getWave() {
     return this.wave;
+  }
+
+  /** Resume the game after wave-clear (called by Game when player picks an upgrade) */
+  resume() {
+    this.waveCleared = false;
+    this.waveTimer = Math.max(CONSTANTS.WAVE_TIMER_MIN,
+      CONSTANTS.WAVE_TIMER_INITIAL - this.wave * CONSTANTS.WAVE_TIMER_DECREASE);
+  }
+
+  /** Reset spawner state for a fresh game */
+  reset() {
+    this.wave = 0;
+    this.waveTimer = CONSTANTS.WAVE_TIMER_INITIAL;
+    this.spawnQueue = [];
+    this.spawnRate = 0.5;
+    this.spawnTimer = 0;
+    this.totalEnemiesSpawned = 0;
+    this.waveCleared = false;
+    this.onWaveCleared = null;
   }
 }
 
@@ -1999,7 +2022,7 @@ class Renderer {
 // ============================================================
 // GAME CLASS (Steps 1-3)
 // ============================================================
-const GameState = { PLAYING: 'playing', GAME_OVER: 'game_over' };
+const GameState = { PLAYING: 'playing', UPGRADE_SELECT: 'upgrade_select', GAME_OVER: 'game_over' };
 let game = null; // Global ref for enemy update callbacks
 
 class Game {
@@ -2022,18 +2045,52 @@ class Game {
     this.frameCount = 0;
     this.score = 0;
 
-    // Keyboard restart
+    // Wave-clear transition prompt timer
+    this.waveClearDisplayTimer = 0;
+    this.waveClearDisplayDuration = 2.5; // seconds to show wave-clear prompt
+    this.waveClearReadyTimer = 0; // counts down to button enable
+    this.waveClearReadyDuration = 2.5; // seconds before button becomes clickable
+    this.waveClearButtonEnabled = false; // whether the continue button is active
+
+    // Keyboard restart / upgrade continue
     window.addEventListener('keydown', (e) => {
       if (this.state === GameState.GAME_OVER && e.code === 'Space') {
         e.preventDefault();
         this._restart();
       }
-    });
-    this.canvas.addEventListener('click', () => {
-      if (this.state === GameState.GAME_OVER) {
-        this._restart();
+      // Consume Space during upgrade_select (handled in _handleUpgradeSelect)
+      if (this.state === GameState.UPGRADE_SELECT && e.code === 'Space') {
+        e.preventDefault();
       }
     });
+    this.canvas.addEventListener('click', (e) => {
+      if (this.state === GameState.GAME_OVER) {
+        this._restart();
+      } else if (this.state === GameState.UPGRADE_SELECT) {
+        // Check if click is inside the continue button
+        if (this._upgradeBtnBounds) {
+          const b = this._upgradeBtnBounds;
+          if (e.clientX >= b.x && e.clientX <= b.x + b.w &&
+              e.clientY >= b.y && e.clientY <= b.y + b.h) {
+            this._startNextWave();
+          }
+        }
+      }
+    });
+    // Also handle touch directly on the button (faster response on mobile)
+    this.canvas.addEventListener('touchstart', (e) => {
+      if (this.state === GameState.UPGRADE_SELECT && this._upgradeBtnBounds) {
+        const b = this._upgradeBtnBounds;
+        for (const touch of e.changedTouches) {
+          if (touch.clientX >= b.x && touch.clientX <= b.x + b.w &&
+              touch.clientY >= b.y && touch.clientY <= b.y + b.h) {
+            e.preventDefault();
+            this._startNextWave();
+            break;
+          }
+        }
+      }
+    }, { passive: false });
 
     this._setupUI();
     this._start();
@@ -2045,6 +2102,18 @@ class Game {
     document.getElementById('weapon-display').textContent = 'Laser';
     document.getElementById('instructions').textContent =
       'WASD to move · Click to shoot · Mouse to aim';
+  }
+
+  _setupWaveClear() {
+    // Set up wave-clear callback so spawner knows to pause
+    this.spawner.onWaveCleared = () => {
+      if (this.state === GameState.PLAYING) {
+        this.state = GameState.UPGRADE_SELECT;
+        this.waveClearDisplayTimer = this.waveClearDisplayDuration;
+        this.waveClearReadyTimer = this.waveClearReadyDuration;
+        this.waveClearButtonEnabled = false;
+      }
+    };
   }
 
   _updateHPBar() {
@@ -2073,6 +2142,8 @@ class Game {
       this.entityManager.obstacles.push(obs);
       this.entityManager.allEntities.push(obs);
     }
+    // Set up wave-clear callback
+    this._setupWaveClear();
     // Start first wave
     this.spawner.startWave(this.player.x, this.player.y);
     this._loop(this.lastTime);
@@ -2107,6 +2178,9 @@ class Game {
     // Reset score
     this.score = 0;
     this.state = GameState.PLAYING;
+
+    // Reset wave-clear state
+    this.waveClearDisplayTimer = 0;
 
     // Reset shake
     this.camera.shakeAmount = 0;
@@ -2146,9 +2220,46 @@ class Game {
     requestAnimationFrame((t) => this._loop(t));
   }
 
-  _update(dt) {
-    if (this.state !== GameState.PLAYING) return;
+  _handleUpgradeSelect(dt) {
+    // In upgrade_select: show prompt, countdown, accept button input
+    this.waveClearDisplayTimer -= dt;
+    this.waveClearReadyTimer -= dt;
 
+    // Enable button once the ready timer expires
+    if (this.waveClearReadyTimer <= 0) {
+      this.waveClearButtonEnabled = true;
+    }
+
+    // Allow player to press SPACE to continue (backup, button is primary)
+    if (this.input.keys['Space'] && this.waveClearButtonEnabled) {
+      this.input.keys['Space'] = false; // consume the key
+      this._startNextWave();
+    }
+  }
+
+  _startNextWave() {
+    // Resume the spawner (this starts the next wave internally)
+    this.spawner.resume();
+    this.spawner.startWave(this.player.x, this.player.y);
+    this.state = GameState.PLAYING;
+    this.waveClearDisplayTimer = 0;
+  }
+
+  _update(dt) {
+    if (this.state === GameState.PLAYING) {
+      this._updatePlaying(dt);
+    } else if (this.state === GameState.UPGRADE_SELECT) {
+      this._updateUpgradeSelect(dt);
+    }
+    // In GAME_OVER state, nothing updates
+  }
+
+  _updateUpgradeSelect(dt) {
+    // In upgrade_select: game is paused, just update the display timer
+    this._handleUpgradeSelect(dt);
+  }
+
+  _updatePlaying(dt) {
     // Update player
     this.player.update(dt);
 
@@ -2277,20 +2388,123 @@ class Game {
     // Draw enemies and projectiles
     this.entityManager.draw(ctx, camera);
 
-    // Draw player on top
-    if (this.player.active) {
+    // Draw player on top (only in playing state)
+    if (this.player.active && this.state === GameState.PLAYING) {
       this.player.draw(ctx, camera);
     }
     ctx.restore();
 
-    // Draw crosshair in screen space (no camera transform)
-    this.renderer.drawCrosshair(camera, this.input);
+    // Draw crosshair in screen space (no camera transform; only in playing state)
+    if (this.state === GameState.PLAYING) {
+      this.renderer.drawCrosshair(camera, this.input);
+    }
 
     // Minimap
     this._drawMinimap();
 
     // Wave info
     this._drawWaveInfo();
+
+    // Wave-clear prompt (upgrade_select state)
+    if (this.state === GameState.UPGRADE_SELECT) {
+      this._drawUpgradeSelectPrompt(ctx);
+    }
+  }
+
+  _drawUpgradeSelectPrompt(ctx) {
+    const progress = Math.max(0, this.waveClearDisplayTimer / this.waveClearDisplayDuration);
+
+    // Semi-transparent overlay
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+    // Wave clear text
+    const pulse = 1 + 0.05 * Math.sin(this.waveClearDisplayTimer * 6);
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    // Title
+    ctx.font = `bold ${Math.round(48 * pulse)}px monospace`;
+    ctx.fillStyle = '#ffcc44';
+    ctx.shadowColor = 'rgba(255, 200, 50, 0.5)';
+    ctx.shadowBlur = 20;
+    ctx.fillText('WAVE CLEARED!', this.canvas.width / 2, this.canvas.height / 2 - 40);
+
+    // Upgrade hint
+    ctx.font = '14px monospace';
+    ctx.fillStyle = 'rgba(255, 204, 68, 0.5)';
+    ctx.fillText(`(Upgrade selection coming soon...)`, this.canvas.width / 2, this.canvas.height / 2 + 10);
+
+    // Countdown text
+    const readyText = this.waveClearReadyTimer > 0
+      ? `Next wave in ${Math.ceil(this.waveClearReadyTimer)}s...`
+      : '';
+    ctx.font = '16px monospace';
+    ctx.fillStyle = this.waveClearReadyTimer > 0
+      ? 'rgba(255, 255, 255, 0.4)'
+      : 'rgba(255, 255, 255, 0.8)';
+    ctx.fillText(readyText, this.canvas.width / 2, this.canvas.height / 2 + 40);
+
+    // Progress bar (countdown)
+    const barWidth = 200;
+    const barHeight = 4;
+    const barX = this.canvas.width / 2 - barWidth / 2;
+    const barY = this.canvas.height / 2 + 55;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+    ctx.fillRect(barX, barY, barWidth, barHeight);
+    const readyProgress = Math.min(1, Math.max(0, 1 - (this.waveClearReadyTimer / this.waveClearReadyDuration)));
+    ctx.fillStyle = this.waveClearButtonEnabled ? '#44dd66' : '#888888';
+    ctx.fillRect(barX, barY, barWidth * readyProgress, barHeight);
+
+    // Continue button (appears after ready timer)
+    if (this.waveClearButtonEnabled) {
+      const btnW = 220;
+      const btnH = 44;
+      const btnX = this.canvas.width / 2 - btnW / 2;
+      const btnY = this.canvas.height / 2 + 75;
+
+      // Button background
+      const glow = 0.15 + 0.1 * Math.sin(performance.now() / 300);
+      ctx.fillStyle = `rgba(68, 221, 102, ${glow})`;
+      ctx.fillRect(btnX - 4, btnY - 4, btnW + 8, btnH + 8);
+
+      ctx.fillStyle = 'rgba(34, 100, 50, 0.85)';
+      ctx.strokeStyle = '#44dd66';
+      ctx.lineWidth = 2;
+      // Draw rounded rect using bezier curves (roundRect not in all browsers)
+      const r = 8; // corner radius
+      ctx.beginPath();
+      ctx.moveTo(btnX + r, btnY);
+      ctx.lineTo(btnX + btnW - r, btnY);
+      ctx.arcTo(btnX + btnW, btnY, btnX + btnW, btnY + r, r);
+      ctx.arcTo(btnX + btnW, btnY + btnH, btnX + btnW - r, btnY + btnH, r);
+      ctx.arcTo(btnX, btnY + btnH, btnX, btnY + btnH - r, r);
+      ctx.arcTo(btnX, btnY, btnX + r, btnY, r);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // Button text
+      ctx.font = 'bold 18px monospace';
+      ctx.fillStyle = '#ffffff';
+      ctx.shadowColor = 'rgba(68, 221, 102, 0.5)';
+      ctx.shadowBlur = 8;
+      ctx.fillText('▶ NEXT WAVE', this.canvas.width / 2, this.canvas.height / 2 + 97);
+      ctx.shadowBlur = 0;
+
+      // Store button bounds for click detection
+      this._upgradeBtnBounds = {
+        x: btnX,
+        y: btnY,
+        w: btnW,
+        h: btnH
+      };
+    } else {
+      this._upgradeBtnBounds = null;
+    }
+
+    ctx.restore();
   }
 
   _drawMinimap() {
