@@ -110,6 +110,28 @@
     text-align: center;
     text-shadow: 0 0 4px #000;
   }
+  #build-hud {
+    position: fixed;
+    top: 60px;
+    left: 12px;
+    z-index: 10;
+    pointer-events: none;
+  }
+  #build-hud-title {
+    color: rgba(255,204,68,0.7);
+    font: bold 11px monospace;
+    margin-bottom: 4px;
+    text-shadow: 0 0 4px #000;
+  }
+  .build-hud-entry {
+    color: rgba(255,255,255,0.6);
+    font: 10px monospace;
+    margin-bottom: 2px;
+    text-shadow: 0 0 4px #000;
+  }
+  .build-hud-levels {
+    color: rgba(100,221,255,0.7);
+  }
 </style>
 </head>
 <body>
@@ -120,6 +142,10 @@
 <div id="hp-text">100 / 100</div>
 <div id="score-display">Score: 0</div>
 <div id="weapon-display">Laser</div>
+<div id="build-hud">
+  <div id="build-hud-title">UPGRADES</div>
+  <div id="build-hud-entries"></div>
+</div>
 <div id="instructions">WASD to move · Click to shoot · Mouse to aim</div>
 
 <!-- Touch controls (shown on mobile) -->
@@ -194,7 +220,7 @@ const CONSTANTS = {
 CONSTANTS.OBSTACLE_MIN_RADIUS = 20;
 CONSTANTS.OBSTACLE_MAX_RADIUS = 50;
 CONSTANTS.OBSTACLE_COUNT = 15;
-CONSTANTS.OBSTACLE_MIN_DIST = 80;  // min distance from world center (player spawn)
+CONSTANTS.OBSTACLE_MIN_DIST = 180;  // min distance from world center (player spawn) - large enough to prevent trapping
 CONSTANTS.WALL_COUNT = 6;
 CONSTANTS.WALL_WIDTH = 60;
 CONSTANTS.WALL_LENGTH_MIN = 100;
@@ -719,6 +745,14 @@ class Player extends Entity {
     this.camera = camera;
     this.firing = false;
     this.game = null; // reference set in Game.start
+
+    // Upgrade build state (Step 6)
+    this.upgradeLevels = {
+      damage: 0, rapidFire: 0, multishot: 0, pierce: 0,
+      projectileSpeed: 0, homing: 0, explosion: 0,
+      maxHp: 0, armor: 0, thrusters: 0,
+    };
+    this.stats = { ...BASE_STATS }; // derived stats, rebuilt after each choice
   }
 
   update(dt) {
@@ -731,12 +765,16 @@ class Player extends Entity {
     this.vx *= Math.exp(-CONSTANTS.PLAYER_FRICTION * dt);
     this.vy *= Math.exp(-CONSTANTS.PLAYER_FRICTION * dt);
 
+    // Apply derived move speed multiplier (Step 6)
+    const speedMult = this.stats ? this.stats.moveSpeedMultiplier : 1;
+    const maxSpeed = CONSTANTS.PLAYER_MAX_SPEED * speedMult;
+
     // Clamp speed
     const speed = Math.hypot(this.vx, this.vy);
-    if (speed > CONSTANTS.PLAYER_MAX_SPEED) {
+    if (speed > maxSpeed) {
       const n = Math2.normalize(this.vx, this.vy);
-      this.vx = n.x * CONSTANTS.PLAYER_MAX_SPEED;
-      this.vy = n.y * CONSTANTS.PLAYER_MAX_SPEED;
+      this.vx = n.x * maxSpeed;
+      this.vy = n.y * maxSpeed;
     }
 
     // Apply velocity
@@ -836,7 +874,7 @@ class Player extends Entity {
 }
 
 // ============================================================
-// PROJECTILE ENTITY (Step 2)
+// PROJECTILE ENTITY (Steps 2 & 8 — with pierce/homing/explosion)
 // ============================================================
 class Projectile extends Entity {
   constructor() {
@@ -847,6 +885,12 @@ class Projectile extends Entity {
     this.lifetime = CONSTANTS.BULLET_LIFETIME;
     this.owner = 'player'; // 'player' or 'enemy'
     this.active = false;
+    // Projectile behaviors (Step 8)
+    this.pierce = 0;
+    this.homingStrength = 0;
+    this.explosionRadius = 0;
+    this.explosionDamage = 0;
+    this._homingAngle = 0;
   }
 
   init(x, y, vx, vy, damage, lifetime, owner) {
@@ -859,20 +903,112 @@ class Projectile extends Entity {
     this.lifetime = lifetime || CONSTANTS.BULLET_LIFETIME;
     this.owner = owner || 'player';
     this.active = true;
+    this.pierce = 0;
+    this.homingStrength = 0;
+    this.explosionRadius = 0;
+    this.explosionDamage = 0;
+    this._homingAngle = Math.atan2(this.vy, this.vx); // match initial velocity direction
+    this._hitEnemyIds = new Set();
     return this;
   }
 
   update(dt) {
+    // Homing: steer toward nearest enemy (player projectiles only)
+    if (this.owner === 'player' && this.homingStrength > 0) {
+      this._applyHoming(dt);
+    }
+
+    // Apply velocity
     this.x += this.vx * dt;
     this.y += this.vy * dt;
     this.lifetime -= dt;
     if (this.lifetime <= 0) {
+      this._onDeath();
       this.active = false;
     }
     // Bounds check
     if (this.x < 0 || this.x > CONSTANTS.WORLD_WIDTH ||
         this.y < 0 || this.y > CONSTANTS.WORLD_HEIGHT) {
+      this._onDeath();
       this.active = false;
+    }
+  }
+
+  /** Steer projectile toward nearest enemy within a forward cone */
+  _applyHoming(dt) {
+    const game = window._gameRef;
+    if (!game) return;
+    const enemies = game.entityManager.getAllOfType('enemy');
+    let nearestEnemy = null;
+    let nearestDist = Infinity;
+
+    // Current flight direction angle
+    const flightAngle = Math.atan2(this.vy, this.vx);
+    const speed = Math.hypot(this.vx, this.vy);
+
+    for (const enemy of enemies) {
+      if (!enemy.active) continue;
+      const d = Math2.dist(this.x, this.y, enemy.x, enemy.y);
+      // Skip enemies too far away (max 500px detection range)
+      if (d > 500) continue;
+      // Check if enemy is roughly in front (within ±70° of flight direction)
+      const angleToEnemy = Math.atan2(enemy.y - this.y, enemy.x - this.x);
+      let angleDiff = angleToEnemy - flightAngle;
+      while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+      while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+      // Only consider enemies within the forward cone
+      if (Math.abs(angleDiff) > Math.PI * 0.4) continue;
+      // Pick the nearest enemy within the cone
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearestEnemy = enemy;
+      }
+    }
+
+    if (nearestEnemy) {
+      const targetAngle = Math.atan2(
+        nearestEnemy.y - this.y,
+        nearestEnemy.x - this.x
+      );
+      // Normalize angle difference from current homing angle
+      let steeringAngleDiff = targetAngle - this._homingAngle;
+      while (steeringAngleDiff > Math.PI) steeringAngleDiff -= 2 * Math.PI;
+      while (steeringAngleDiff < -Math.PI) steeringAngleDiff += 2 * Math.PI;
+
+      // Steer gradually: homingStrength is in degrees per second
+      const homingRateRad = this.homingStrength * (Math.PI / 180);
+      const maxTurnAngle = homingRateRad * dt;
+
+      // Apply turn, but don't overshoot
+      const turnAmount = Math.min(Math.abs(steeringAngleDiff), maxTurnAngle);
+      this._homingAngle += Math.sign(steeringAngleDiff) * turnAmount;
+
+      // Update velocity direction (maintain speed)
+      this.vx = Math.cos(this._homingAngle) * speed;
+      this.vy = Math.sin(this._homingAngle) * speed;
+    }
+  }
+
+  /** On projectile death: trigger explosion if any */
+  _onDeath() {
+    if (this.explosionRadius > 0 && this.owner === 'player') {
+      this._triggerExplosion();
+    }
+  }
+
+  /** Deal area damage in a radius */
+  _triggerExplosion() {
+    const game = window._gameRef;
+    if (!game) return;
+    const enemies = game.entityManager.getAllOfType('enemy');
+    const explosionDmg = this.damage * this.explosionDamage;
+
+    for (const enemy of enemies) {
+      if (!enemy.active) continue;
+      const dist = Math2.dist(this.x, this.y, enemy.x, enemy.y);
+      if (dist <= this.explosionRadius) {
+        enemy.takeDamage(explosionDmg);
+      }
     }
   }
 
@@ -883,25 +1019,61 @@ class Projectile extends Entity {
     // Glow
     ctx.beginPath();
     ctx.arc(0, 0, this.radius * 2.5, 0, Math.PI * 2);
-    const glowColor = this.owner === 'player'
-      ? 'rgba(100, 200, 255, 0.15)'
-      : 'rgba(255, 100, 100, 0.15)';
+    let glowColor = 'rgba(100, 200, 255, 0.15)';
+    let bulletColor = '#66ccff';
+    let edgeColor = '#aaddff';
+
+    // Color based on behavior (Step 8)
+    if (this.explosionRadius > 0) {
+      glowColor = 'rgba(255, 150, 50, 0.25)';
+      bulletColor = '#ff8833';
+      edgeColor = '#ffbb66';
+    } else if (this.homingStrength > 0) {
+      glowColor = 'rgba(150, 100, 255, 0.2)';
+      bulletColor = '#aa77ff';
+      edgeColor = '#ccaaff';
+    } else if (this.pierce > 0) {
+      glowColor = 'rgba(100, 255, 200, 0.2)';
+      bulletColor = '#44ddaa';
+      edgeColor = '#88ffcc';
+    }
+
+    if (this.owner === 'enemy') {
+      glowColor = 'rgba(255, 100, 100, 0.15)';
+      bulletColor = '#ff6644';
+      edgeColor = '#ffaa88';
+    }
+
     ctx.fillStyle = glowColor;
     ctx.fill();
 
     // Bullet
     ctx.beginPath();
     ctx.arc(0, 0, this.radius, 0, Math.PI * 2);
-    const bulletColor = this.owner === 'player'
-      ? '#66ccff'
-      : '#ff6644';
     ctx.fillStyle = bulletColor;
     ctx.fill();
-    ctx.strokeStyle = this.owner === 'player'
-      ? '#aaddff'
-      : '#ffaa88';
+    ctx.strokeStyle = edgeColor;
     ctx.lineWidth = 1;
     ctx.stroke();
+
+    // Pierce indicator: small rings around bullet
+    if (this.pierce > 0) {
+      ctx.beginPath();
+      ctx.arc(0, 0, this.radius + 3, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(100, 255, 200, 0.4)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    // Explosion indicator: pulsing outer ring
+    if (this.explosionRadius > 0) {
+      const pulse = 1 + 0.1 * Math.sin(performance.now() / 100);
+      ctx.beginPath();
+      ctx.arc(0, 0, (this.radius + 4) * pulse, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255, 150, 50, 0.3)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
 
     ctx.restore();
   }
@@ -919,16 +1091,14 @@ class Projectile extends Entity {
 }
 
 // ============================================================
-// WEAPON SYSTEM (Step 2)
+// WEAPON SYSTEM (Steps 2 & 8 — now reads from player.stats)
 // ============================================================
 class Weapon {
   constructor(baseType) {
     this.baseType = baseType || 'laser';
-    this.fireRate = CONSTANTS.FIRE_COOLDOWN;
     this.cooldownTimer = 0;
-    this.damage = CONSTANTS.BULLET_DAMAGE;
-    this.speed = CONSTANTS.BULLET_SPEED;
     this.upgrades = []; // composable upgrade layers
+    this._lastStatsHash = '';
   }
 
   addUpgrade(upgrade) {
@@ -937,6 +1107,24 @@ class Weapon {
 
   removeUpgrade(id) {
     this.upgrades = this.upgrades.filter(u => u.id !== id);
+  }
+
+  /** Invalidate cached stats — call when player stats change */
+  invalidateStats() {
+    this._lastStatsHash = '';
+  }
+
+  /** Sync weapon stats from derived player stats */
+  syncStats(player) {
+    if (player.stats && !this._lastStatsHash) {
+      const stats = player.stats;
+      this.damage = CONSTANTS.BULLET_DAMAGE * stats.damageMultiplier;
+      this.fireRate = stats.fireCooldown;
+      this.speed = stats.projectileSpeed;
+      this.extraShots = stats.extraShots;
+      this.spread = stats.spread;
+      this._lastStatsHash = 'synced';
+    }
   }
 
   canFire(dt) {
@@ -965,26 +1153,51 @@ class Weapon {
 
   /** Fire projectiles, returns array of projectiles */
   fire(player, entityManager, camera) {
+    // Sync stats from player (uses derived stats from upgrades)
+    this.syncStats(player);
     if (!this.canFire(1/60)) return [];
     this.resetCooldown();
 
     const aimDir = this.getFireDirection(player, player.input, camera);
     const projectiles = [];
+    const originX = player.x + Math.cos(player.rotation) * player.radius;
+    const originY = player.y + Math.sin(player.rotation) * player.radius;
+
+    // Calculate base angle
+    const baseAngle = Math.atan2(aimDir.y, aimDir.x);
+
+    // Determine how many shots to fire
+    const totalShots = 1 + this.extraShots;
+
+    // Fire main shot and additional shots (multishot)
+    for (let i = 0; i < totalShots; i++) {
+      // Spread calculation: distribute shots evenly around center
+      let spreadAngle = 0;
+      if (totalShots > 1) {
+        // Evenly distribute: -spread, 0, +spread for 3 shots, etc.
+        const spreadRange = (totalShots - 1) / 2;
+        spreadAngle = (i - spreadRange) * this.spread;
+      }
+
+      const angle = baseAngle + spreadAngle;
+      const vx = Math.cos(angle) * this.speed;
+      const vy = Math.sin(angle) * this.speed;
+
+      const proj = entityManager.acquireProjectile(
+        originX, originY, vx, vy,
+        this.damage,
+        this.speed,
+        'player'
+      );
+      // Apply projectile behaviors from stats
+      proj.pierce = player.stats.pierce || 0;
+      proj.homingStrength = player.stats.homingStrength || 0;
+      proj.explosionRadius = player.stats.explosionRadius || 0;
+      proj.explosionDamage = player.stats.explosionDamage || 0;
+      projectiles.push(proj);
+    }
 
     // Each upgrade's onFire can spawn additional bullets
-    // First, the base fire
-    const baseProj = entityManager.acquireProjectile(
-      player.x + Math.cos(player.rotation) * player.radius,
-      player.y + Math.sin(player.rotation) * player.radius,
-      aimDir.x * this.speed,
-      aimDir.y * this.speed,
-      this.damage,
-      this.speed,
-      'player'
-    );
-    projectiles.push(baseProj);
-
-    // Then each upgrade's onFire
     for (const upgrade of this.upgrades) {
       if (upgrade.onFire) {
         const extraProjs = upgrade.onFire(
@@ -999,6 +1212,379 @@ class Weapon {
 
     return projectiles;
   }
+}
+
+// ============================================================
+// UPGRADE SYSTEM (Step 6 — Data Model & Offer Generation)
+// ============================================================
+
+// Base stats for the player (before upgrade bonuses)
+const BASE_STATS = {
+  damageMultiplier: 1.0,
+  fireCooldown: CONSTANTS.FIRE_COOLDOWN,
+  projectileSpeed: CONSTANTS.BULLET_SPEED,
+  extraShots: 0,
+  spread: 0.0,
+  pierce: 0,
+  homingStrength: 0,
+  maxHpBonus: 0,
+  moveSpeedMultiplier: 1.0,
+  armor: 0,
+};
+
+// Upgrade registry — data-driven definition of all 10 upgrades.
+// Each upgrade has up to N levels. Selecting an upgrade increments its level.
+// Effects are applied cumulatively: for each level the player owns, the
+// corresponding entry in `.levels[]` is merged into the base stats.
+const UPGRADES = {
+  damage: {
+    id: 'damage',
+    name: 'Overcharged Laser',
+    description: 'Increases projectile damage',
+    icon: '⚡',
+    maxLevel: 5,
+    weight: 10,
+    requires: null,
+    levels: [
+      { damageMultiplier: 1.20 },
+      { damageMultiplier: 1.20 },
+      { damageMultiplier: 1.20 },
+      { damageMultiplier: 1.20 },
+      { damageMultiplier: 1.20 },
+    ],
+  },
+  rapidFire: {
+    id: 'rapidFire',
+    name: 'Cooling Vents',
+    description: 'Reduces fire cooldown',
+    icon: '❄️',
+    maxLevel: 5,
+    weight: 10,
+    requires: null,
+    levels: [
+      { fireCooldownMult: 0.85 },
+      { fireCooldownMult: 0.85 },
+      { fireCooldownMult: 0.85 },
+      { fireCooldownMult: 0.85 },
+      { fireCooldownMult: 0.85 },
+    ],
+  },
+  multishot: {
+    id: 'multishot',
+    name: 'Split Beam',
+    description: 'Adds side projectiles with controlled spread',
+    icon: '🔱',
+    maxLevel: 3,
+    weight: 7,
+    requires: null,
+    levels: [
+      { extraShots: 1, spread: 0.14 },
+      { extraShots: 1, spread: 0.14 },
+      { extraShots: 1, spread: 0.14 },
+    ],
+  },
+  pierce: {
+    id: 'pierce',
+    name: 'Phase Rounds',
+    description: 'Projectiles pass through enemies',
+    icon: '💎',
+    maxLevel: 4,
+    weight: 8,
+    requires: null,
+    levels: [
+      { pierce: 1 },
+      { pierce: 1 },
+      { pierce: 1 },
+      { pierce: 1 },
+    ],
+  },
+  projectileSpeed: {
+    id: 'projectileSpeed',
+    name: 'Particle Accelerator',
+    description: 'Increases projectile speed and effective range',
+    icon: '🚀',
+    maxLevel: 3,
+    weight: 7,
+    requires: null,
+    levels: [
+      { projectileSpeedMult: 1.30 },
+      { projectileSpeedMult: 1.30 },
+      { projectileSpeedMult: 1.30 },
+    ],
+  },
+  homing: {
+    id: 'homing',
+    name: 'Targeting Array',
+    description: 'Projectiles curve toward nearby enemies',
+    icon: '🎯',
+    maxLevel: 3,
+    weight: 6,
+    requires: null,
+    levels: [
+      { homingStrength: 24 },  // ~0.4°/frame turn rate
+      { homingStrength: 48 },  // ~0.8°/frame turn rate
+      { homingStrength: 96 },  // ~1.6°/frame turn rate
+    ],
+  },
+  explosion: {
+    id: 'explosion',
+    name: 'Volatile Core',
+    description: 'Projectiles explode on hit, damaging enemies in a radius',
+    icon: '💥',
+    maxLevel: 3,
+    weight: 5,
+    requires: 'pierce',  // requires pierce level 1
+    requiresLevel: 1,
+    levels: [
+      { explosionRadius: 40, explosionDamage: 0.5 },
+      { explosionRadius: 55, explosionDamage: 0.6 },
+      { explosionRadius: 70, explosionDamage: 0.75 },
+    ],
+  },
+  maxHp: {
+    id: 'maxHp',
+    name: 'Reinforced Hull',
+    description: 'Increases maximum HP and grants healing',
+    icon: '🛡️',
+    maxLevel: 3,
+    weight: 8,
+    requires: null,
+    levels: [
+      { maxHpBonus: 25 },
+      { maxHpBonus: 25 },
+      { maxHpBonus: 25 },
+    ],
+  },
+  armor: {
+    id: 'armor',
+    name: 'Deflector Plating',
+    description: 'Reduces incoming damage',
+    icon: '🔰',
+    maxLevel: 3,
+    weight: 8,
+    requires: null,
+    levels: [
+      { armor: 2 },
+      { armor: 2 },
+      { armor: 3 },
+    ],
+  },
+  thrusters: {
+    id: 'thrusters',
+    name: 'Ion Thrusters',
+    description: 'Increases movement speed',
+    icon: '🔥',
+    maxLevel: 3,
+    weight: 8,
+    requires: null,
+    levels: [
+      { moveSpeedMultiplier: 1.15 },
+      { moveSpeedMultiplier: 1.15 },
+      { moveSpeedMultiplier: 1.15 },
+    ],
+  },
+};
+
+/**
+ * Rebuild the player's derived stats from base values and upgrade levels.
+ * Called after every upgrade selection. Mutates player.stats in place.
+ */
+function rebuildPlayerStats(player) {
+  // Start with base values
+  const stats = {
+    damageMultiplier: BASE_STATS.damageMultiplier,
+    fireCooldown: BASE_STATS.fireCooldown,
+    projectileSpeed: BASE_STATS.projectileSpeed,
+    extraShots: BASE_STATS.extraShots,
+    spread: BASE_STATS.spread,
+    pierce: BASE_STATS.pierce,
+    homingStrength: BASE_STATS.homingStrength,
+    maxHpBonus: BASE_STATS.maxHpBonus,
+    moveSpeedMultiplier: BASE_STATS.moveSpeedMultiplier,
+    armor: BASE_STATS.armor,
+  };
+
+  // Apply each upgrade level cumulatively
+  for (const [upgradeId, level] of Object.entries(player.upgradeLevels)) {
+    const upgradeDef = UPGRADES[upgradeId];
+    if (!upgradeDef) continue;
+    for (let i = 0; i < level; i++) {
+      const effect = upgradeDef.levels[i];
+      if (!effect) continue;
+      for (const [key, value] of Object.entries(effect)) {
+        if (key === 'fireCooldownMult') {
+          // fireCooldownMult applies multiplicatively
+          stats.fireCooldown *= value;
+        } else if (key === 'projectileSpeedMult') {
+          stats.projectileSpeed *= value;
+        } else if (key === 'damageMultiplier') {
+          stats.damageMultiplier += value - 1;  // additive stacking on top of 1.0 base
+        } else if (key === 'moveSpeedMultiplier') {
+          stats.moveSpeedMultiplier *= value;  // multiplicative stacking
+        } else {
+          stats[key] = (stats[key] || 0) + value;
+        }
+      }
+    }
+  }
+
+  player.stats = stats;
+
+  // Apply maxHpBonus to player's actual maxHp and current hp (proportional)
+  const hpBonus = stats.maxHpBonus;
+  if (hpBonus > 0) {
+    // Increase maxHp by the bonus amount
+    player.maxHp = CONSTANTS.PLAYER_MAX_HP + hpBonus;
+    // Increase current hp proportionally (so healing doesn't make them full again)
+    const hpRatio = player.hp / CONSTANTS.PLAYER_MAX_HP;
+    player.hp = Math.min(player.maxHp, hpRatio * player.maxHp);
+  }
+}
+
+/**
+ * Check if an upgrade is eligible for selection.
+ * Returns true if not maxed and prerequisites are met.
+ */
+function isUpgradeEligible(upgradeId, player) {
+  const upgradeDef = UPGRADES[upgradeId];
+  if (!upgradeDef) return false;
+  // Already at max level
+  if (player.upgradeLevels[upgradeId] >= upgradeDef.maxLevel) return false;
+  // Check prerequisites
+  if (upgradeDef.requires) {
+    const reqLevel = upgradeDef.requiresLevel || 1;
+    if (player.upgradeLevels[upgradeDef.requires] < reqLevel) return false;
+  }
+  return true;
+}
+
+/**
+ * Generate a list of eligible upgrades and select 3 distinct offers by weight.
+ * Returns an array of offer objects, each containing:
+ *   { id, name, description, icon, currentLevel, nextLevel, nextEffects }
+ * If fewer than 3 eligible upgrades exist, returns all of them.
+ */
+function generateUpgradeOffers(player, count = 3) {
+  // Filter eligible upgrades
+  const eligible = Object.keys(UPGRADES).filter(id => isUpgradeEligible(id, player));
+
+  // If we have fewer eligible than requested, return all of them
+  if (eligible.length === 0) {
+    return [];  // player has maxed all upgrades
+  }
+  if (eligible.length < count) {
+    count = eligible.length;
+  }
+
+  // Weighted random selection without replacement
+  const offers = [];
+  const available = [...eligible];
+
+  while (offers.length < count && available.length > 0) {
+    // Calculate total weight of remaining options
+    let totalWeight = 0;
+    for (const id of available) {
+      totalWeight += UPGRADES[id].weight;
+    }
+
+    // Pick a random threshold
+    let threshold = Math.random() * totalWeight;
+    let chosen = available[0];
+
+    for (const id of available) {
+      threshold -= UPGRADES[id].weight;
+      if (threshold <= 0) {
+        chosen = id;
+        break;
+      }
+    }
+
+    // Build offer data for display
+    const upgradeDef = UPGRADES[chosen];
+    const currentLevel = player.upgradeLevels[chosen];
+    const nextEffects = upgradeDef.levels[currentLevel] || {};
+
+    // Format next effect text
+    const effectText = formatUpgradeEffect(chosen, nextEffects);
+
+    offers.push({
+      id: chosen,
+      name: upgradeDef.name,
+      description: upgradeDef.description,
+      icon: upgradeDef.icon,
+      currentLevel: currentLevel,
+      nextLevel: currentLevel + 1,
+      nextEffects: nextEffects,
+      effectText: effectText,
+      weight: upgradeDef.weight,
+    });
+
+    // Remove from available (no replacement)
+    const idx = available.indexOf(chosen);
+    if (idx >= 0) available.splice(idx, 1);
+  }
+
+  return offers;
+}
+
+/**
+ * Format the effect text for display on an upgrade card.
+ */
+function formatUpgradeEffect(upgradeId, effects) {
+  const parts = [];
+  for (const [key, value] of Object.entries(effects)) {
+    switch (key) {
+      case 'damageMultiplier':
+        parts.push(`+${Math.round((value - 1) * 100)}% damage`);
+        break;
+      case 'fireCooldownMult':
+        parts.push(`×${value} cooldown`);
+        break;
+      case 'extraShots':
+        parts.push(`+${value} shot(s)`);
+        break;
+      case 'spread':
+        parts.push(`${Math.round(value * 100)}° spread`);
+        break;
+      case 'pierce':
+        parts.push(`+${value} pierce`);
+        break;
+      case 'projectileSpeedMult':
+        parts.push(`+${Math.round((value - 1) * 100)}% speed`);
+        break;
+      case 'homingStrength':
+        parts.push(`${value} homing`);
+        break;
+      case 'explosionRadius':
+        parts.push(`${value}px explosion`);
+        break;
+      case 'explosionDamage':
+        parts.push(`${Math.round(value * 100)}% explosion dmg`);
+        break;
+      case 'maxHpBonus':
+        parts.push(`+${value} HP`);
+        break;
+      case 'armor':
+        parts.push(`+${value} armor`);
+        break;
+      case 'moveSpeedMultiplier':
+        parts.push(`×${value} speed`);
+        break;
+      default:
+        parts.push(`${key}: ${value}`);
+    }
+  }
+  return parts.join(', ');
+}
+
+/**
+ * Apply an upgrade selection: increment level, rebuild stats.
+ * Returns the updated offer object.
+ */
+function applyUpgradeChoice(player, offerId) {
+  player.upgradeLevels[offerId] = (player.upgradeLevels[offerId] || 0) + 1;
+  rebuildPlayerStats(player);
+  return UPGRADES[offerId];
 }
 
 // ============================================================
@@ -1110,6 +1696,17 @@ class EntityManager {
     this.obstacles = [];
     this.allEntities = [];
     this.spatialGrid._clear();
+  }
+
+  /** Deactivate and pool all active projectiles (called between waves) */
+  clearProjectiles() {
+    for (const proj of this.projectiles) {
+      if (proj.active) {
+        proj.active = false;
+        this.projectilePool.release(proj);
+      }
+    }
+    this.projectiles = [];
   }
 
   update(dt) {
@@ -1427,9 +2024,10 @@ class Spawner {
       const dist = isShooter ? 400 + Math.random() * 200 : 300 + Math.random() * 150;
       // Try to find a spawn position that doesn't overlap obstacles
       let spawned = false;
-      for (let attempt = 0; attempt < 20 && !spawned; attempt++) {
-        const sx = playerX + Math.cos(angle + (Math.random() - 0.5) * 0.4) * dist;
-        const sy = playerY + Math.sin(angle + (Math.random() - 0.5) * 0.4) * dist;
+      // Try 50 times: wider angle spread for better chances
+      for (let attempt = 0; attempt < 50 && !spawned; attempt++) {
+        const sx = playerX + Math.cos(angle + (Math.random() - 0.5) * 0.8) * dist;
+        const sy = playerY + Math.sin(angle + (Math.random() - 0.5) * 0.8) * dist;
         const clampedX = Math2.clamp(sx, CONSTANTS.SPAWN_MARGIN, this.worldWidth - CONSTANTS.SPAWN_MARGIN);
         const clampedY = Math2.clamp(sy, CONSTANTS.SPAWN_MARGIN, this.worldHeight - CONSTANTS.SPAWN_MARGIN);
         // Check that this position doesn't overlap any obstacle
@@ -1465,16 +2063,50 @@ class Spawner {
           spawned = true;
         }
       }
-      // If all attempts failed, just use the base position anyway (fallback)
+      // Last resort fallback: scan random positions across the whole map until we find a clear spot
       if (!spawned) {
-        this.spawnQueue.push({
-          x: Math2.clamp(playerX + Math.cos(angle) * dist,
-            CONSTANTS.SPAWN_MARGIN, this.worldWidth - CONSTANTS.SPAWN_MARGIN),
-          y: Math2.clamp(playerY + Math.sin(angle) * dist,
-            CONSTANTS.SPAWN_MARGIN, this.worldHeight - CONSTANTS.SPAWN_MARGIN),
-          type: isShooter ? 'shooter' : 'chaser',
-          difficulty: this.wave
-        });
+        for (let fallback = 0; fallback < 200; fallback++) {
+          const rx = CONSTANTS.SPAWN_MARGIN + Math.random() * (this.worldWidth - CONSTANTS.SPAWN_MARGIN * 2);
+          const ry = CONSTANTS.SPAWN_MARGIN + Math.random() * (this.worldHeight - CONSTANTS.SPAWN_MARGIN * 2);
+          let clear = true;
+          const spawnRadius = isShooter ? CONSTANTS.ENEMY_SHOOTER_RADIUS : CONSTANTS.ENEMY_CHASER_RADIUS;
+          for (const obs of this.entityManager.obstacles) {
+            if (!obs.active) continue;
+            if (obs.obstacleType === 'circle') {
+              if (Math2.dist(rx, ry, obs.x, obs.y) < obs.radius + spawnRadius + 5) {
+                clear = false;
+                break;
+              }
+            } else {
+              const cos = Math.cos(-obs.rotation);
+              const sin = Math.sin(-obs.rotation);
+              const localX = (rx - obs.x) * cos - (ry - obs.y) * sin;
+              const localY = (rx - obs.x) * sin + (ry - obs.y) * cos;
+              if (Math.abs(localX) < obs.rectW / 2 + spawnRadius + 5 &&
+                  Math.abs(localY) < obs.rectH / 2 + spawnRadius + 5) {
+                clear = false;
+                break;
+              }
+            }
+          }
+          if (clear) {
+            this.spawnQueue.push({ x: rx, y: ry, type: isShooter ? 'shooter' : 'chaser', difficulty: this.wave });
+            spawned = true;
+            break;
+          }
+        }
+        // Ultimate fallback: if still not found, force spawn at the original angle position
+        // The enemy collision system will push it out
+        if (!spawned) {
+          this.spawnQueue.push({
+            x: Math2.clamp(playerX + Math.cos(angle) * dist,
+              CONSTANTS.SPAWN_MARGIN, this.worldWidth - CONSTANTS.SPAWN_MARGIN),
+            y: Math2.clamp(playerY + Math.sin(angle) * dist,
+              CONSTANTS.SPAWN_MARGIN, this.worldHeight - CONSTANTS.SPAWN_MARGIN),
+            type: isShooter ? 'shooter' : 'chaser',
+            difficulty: this.wave
+          });
+        }
       }
     }
 
@@ -1856,12 +2488,12 @@ class WorldGenerator {
     // Try to place circular asteroids
     for (let i = 0; i < obstacleCount; i++) {
       let attempts = 0;
-      while (attempts < 50) {
+      while (attempts < 100) {
         const radius = Math2.rand(CONSTANTS.OBSTACLE_MIN_RADIUS, CONSTANTS.OBSTACLE_MAX_RADIUS);
         const x = Math2.rand(radius + 50, this.worldWidth - radius - 50);
         const y = Math2.rand(radius + 50, this.worldHeight - radius - 50);
 
-        // Keep away from center (player spawn)
+        // Keep away from center (player spawn) - use a generous radius
         const dx = x - this.worldWidth / 2;
         const dy = y - this.worldHeight / 2;
         if (Math.hypot(dx, dy) < minDist) {
@@ -1893,7 +2525,7 @@ class WorldGenerator {
     const wallCount = CONSTANTS.WALL_COUNT;
     for (let i = 0; i < wallCount; i++) {
       let attempts = 0;
-      while (attempts < 50) {
+      while (attempts < 100) {
         const w = CONSTANTS.WALL_WIDTH;
         const h = Math2.rand(CONSTANTS.WALL_LENGTH_MIN, CONSTANTS.WALL_LENGTH_MAX);
         const x = Math2.rand(w + 50, this.worldWidth - w - 50);
@@ -2067,8 +2699,22 @@ class Game {
       if (this.state === GameState.GAME_OVER) {
         this._restart();
       } else if (this.state === GameState.UPGRADE_SELECT) {
+        // Check if click is inside an upgrade card
+        if (this._upgradeCardBounds) {
+          for (const card of this._upgradeCardBounds) {
+            if (e.clientX >= card.x && e.clientX <= card.x + card.w &&
+                e.clientY >= card.y && e.clientY <= card.y + card.h) {
+              // Select this upgrade (only after ready timer)
+              if (this.waveClearButtonEnabled) {
+                this.selectedOfferId = card.id;
+                this._startNextWave();
+              }
+              return;
+            }
+          }
+        }
         // Check if click is inside the continue button
-        if (this._upgradeBtnBounds) {
+        if (this._upgradeBtnBounds && this.waveClearButtonEnabled) {
           const b = this._upgradeBtnBounds;
           if (e.clientX >= b.x && e.clientX <= b.x + b.w &&
               e.clientY >= b.y && e.clientY <= b.y + b.h) {
@@ -2077,20 +2723,53 @@ class Game {
         }
       }
     });
-    // Also handle touch directly on the button (faster response on mobile)
+    // Also handle touch directly on cards/button (faster response on mobile)
     this.canvas.addEventListener('touchstart', (e) => {
-      if (this.state === GameState.UPGRADE_SELECT && this._upgradeBtnBounds) {
-        const b = this._upgradeBtnBounds;
-        for (const touch of e.changedTouches) {
-          if (touch.clientX >= b.x && touch.clientX <= b.x + b.w &&
-              touch.clientY >= b.y && touch.clientY <= b.y + b.h) {
-            e.preventDefault();
-            this._startNextWave();
-            break;
+      if (this.state === GameState.UPGRADE_SELECT) {
+        // Check if touch is on a card
+        if (this._upgradeCardBounds && this.waveClearButtonEnabled) {
+          for (const card of this._upgradeCardBounds) {
+            for (const touch of e.changedTouches) {
+              if (touch.clientX >= card.x && touch.clientX <= card.x + card.w &&
+                  touch.clientY >= card.y && touch.clientY <= card.y + card.h) {
+                e.preventDefault();
+                this.selectedOfferId = card.id;
+                this._startNextWave();
+                return;
+              }
+            }
+          }
+        }
+        // Check if touch is on the continue button
+        if (this._upgradeBtnBounds && this.waveClearButtonEnabled) {
+          const b = this._upgradeBtnBounds;
+          for (const touch of e.changedTouches) {
+            if (touch.clientX >= b.x && touch.clientX <= b.x + b.w &&
+                touch.clientY >= b.y && touch.clientY <= b.y + b.h) {
+              e.preventDefault();
+              this._startNextWave();
+              break;
+            }
           }
         }
       }
     }, { passive: false });
+
+    // Track mouse position for card hover effects
+    this._upgradeHoveredCard = null;
+    this.canvas.addEventListener('mousemove', (e) => {
+      if (this.state === GameState.UPGRADE_SELECT && this._upgradeCardBounds) {
+        let hovered = null;
+        for (const card of this._upgradeCardBounds) {
+          if (e.clientX >= card.x && e.clientX <= card.x + card.w &&
+              e.clientY >= card.y && e.clientY <= card.y + card.h) {
+            hovered = card.id;
+            break;
+          }
+        }
+        this._upgradeHoveredCard = hovered;
+      }
+    });
 
     this._setupUI();
     this._start();
@@ -2098,10 +2777,26 @@ class Game {
 
   _setupUI() {
     this._updateHPBar();
+    this._updateBuildHud();
     document.getElementById('score-display').textContent = 'Score: 0';
     document.getElementById('weapon-display').textContent = 'Laser';
     document.getElementById('instructions').textContent =
       'WASD to move · Click to shoot · Mouse to aim';
+  }
+
+  /** Update weapon display text based on active upgrades */
+  _updateWeaponDisplay() {
+    const levels = this.player.upgradeLevels;
+    let suffix = '';
+    const upgrades = [];
+    if (levels.rapidFire > 0) upgrades.push('Rapid');
+    if (levels.multishot > 0) upgrades.push('Multi');
+    if (levels.pierce > 0) upgrades.push('Pierce');
+    if (levels.homing > 0) upgrades.push('Homing');
+    if (levels.explosion > 0) upgrades.push('Explosive');
+    if (levels.extraShots && levels.extraShots > 0) upgrades.push('Split');
+    if (upgrades.length > 0) suffix = ' ' + upgrades.join(' + ');
+    document.getElementById('weapon-display').textContent = 'Laser' + suffix;
   }
 
   _setupWaveClear() {
@@ -2109,9 +2804,21 @@ class Game {
     this.spawner.onWaveCleared = () => {
       if (this.state === GameState.PLAYING) {
         this.state = GameState.UPGRADE_SELECT;
+        // Clear all active projectiles so stray shots don't carry into the next wave
+        this.entityManager.clearProjectiles();
         this.waveClearDisplayTimer = this.waveClearDisplayDuration;
         this.waveClearReadyTimer = this.waveClearReadyDuration;
         this.waveClearButtonEnabled = false;
+        // Generate upgrade offers (Step 6)
+        this.currentOffers = generateUpgradeOffers(this.player);
+        this.selectedOfferId = null;
+        // Between-wave healing: restore 15% of max HP (Step 7)
+        const healAmount = Math.floor(this.player.maxHp * 0.15);
+        this.player.hp = Math.min(this.player.maxHp, this.player.hp + healAmount);
+        this._updateHPBar();
+        // Refresh build HUD
+        this._updateBuildHud();
+        this._updateWeaponDisplay();
       }
     };
   }
@@ -2132,8 +2839,35 @@ class Game {
     }
   }
 
+  /** Update the build HUD showing active upgrades (Step 8) */
+  _updateBuildHud() {
+    const entriesDiv = document.getElementById('build-hud-entries');
+    if (!entriesDiv) return;
+    entriesDiv.innerHTML = '';
+
+    let hasUpgrades = false;
+    for (const [id, level] of Object.entries(this.player.upgradeLevels)) {
+      if (level <= 0) continue;
+      const def = UPGRADES[id];
+      if (!def) continue;
+      hasUpgrades = true;
+
+      const entry = document.createElement('div');
+      entry.className = 'build-hud-entry';
+      // Icon + name + level dots
+      const levelDots = '●'.repeat(level) + '○'.repeat(def.maxLevel - level);
+      entry.innerHTML = `${def.icon} ${def.name} <span class="build-hud-levels">[${levelDots}]</span>`;
+      entriesDiv.appendChild(entry);
+    }
+
+    if (!hasUpgrades) {
+      entriesDiv.innerHTML = '<div class="build-hud-entry" style="opacity:0.4">No upgrades yet</div>';
+    }
+  }
+
   _start() {
     game = this; // Global ref for enemy callbacks
+    window._gameRef = this; // Global ref for projectile homing
     this.running = true;
     this.lastTime = performance.now();
     // Generate world obstacles
@@ -2164,6 +2898,15 @@ class Game {
     this.player.active = true;
     this.player.game = this;
 
+    // Reset upgrade state (Step 6)
+    this.player.upgradeLevels = {
+      damage: 0, rapidFire: 0, multishot: 0, pierce: 0,
+      projectileSpeed: 0, homing: 0, explosion: 0,
+      maxHp: 0, armor: 0, thrusters: 0,
+    };
+    this.player.stats = { ...BASE_STATS };
+    rebuildPlayerStats(this.player);
+
     // Generate world obstacles
     this.obstacles = this.worldGen.generate();
     for (const obs of this.obstacles) {
@@ -2173,6 +2916,7 @@ class Game {
 
     // Reset spawner
     this.spawner = new Spawner(this.entityManager, CONSTANTS.WORLD_WIDTH, CONSTANTS.WORLD_HEIGHT);
+    this._setupWaveClear();
     this.spawner.startWave(this.player.x, this.player.y);
 
     // Reset score
@@ -2181,6 +2925,10 @@ class Game {
 
     // Reset wave-clear state
     this.waveClearDisplayTimer = 0;
+
+    // Reset upgrade offers
+    this.currentOffers = null;
+    this.selectedOfferId = null;
 
     // Reset shake
     this.camera.shakeAmount = 0;
@@ -2191,6 +2939,8 @@ class Game {
     document.getElementById('weapon-display').textContent = 'Laser';
     document.getElementById('instructions').textContent =
       'WASD to move · Click to shoot · Mouse to aim';
+    this._updateBuildHud();
+    window._gameRef = this;
   }
 
   _handleGameOver() {
@@ -2221,7 +2971,7 @@ class Game {
   }
 
   _handleUpgradeSelect(dt) {
-    // In upgrade_select: show prompt, countdown, accept button input
+    // In upgrade_select: show upgrade offers, countdown, skip button input
     this.waveClearDisplayTimer -= dt;
     this.waveClearReadyTimer -= dt;
 
@@ -2230,7 +2980,7 @@ class Game {
       this.waveClearButtonEnabled = true;
     }
 
-    // Allow player to press SPACE to continue (backup, button is primary)
+    // Allow player to press SPACE to skip upgrade selection
     if (this.input.keys['Space'] && this.waveClearButtonEnabled) {
       this.input.keys['Space'] = false; // consume the key
       this._startNextWave();
@@ -2238,11 +2988,23 @@ class Game {
   }
 
   _startNextWave() {
+    // Apply the selected upgrade if one was chosen (Step 6/7)
+    if (this.selectedOfferId) {
+      applyUpgradeChoice(this.player, this.selectedOfferId);
+      // Weapon needs to know stats changed
+      this.weapon.invalidateStats();
+    }
     // Resume the spawner (this starts the next wave internally)
     this.spawner.resume();
     this.spawner.startWave(this.player.x, this.player.y);
     this.state = GameState.PLAYING;
     this.waveClearDisplayTimer = 0;
+    this.currentOffers = null;
+    this.selectedOfferId = null;
+    // Refresh HUD after upgrade selection
+    this._updateHPBar();
+    this._updateBuildHud();
+    this._updateWeaponDisplay();
   }
 
   _update(dt) {
@@ -2314,11 +3076,28 @@ class Game {
 
       for (const enemy of enemies) {
         if (!enemy.active) continue;
+        // Skip enemies already hit by this projectile (prevents multi-hit on same target)
+        if (proj._hitEnemyIds.has(enemy.id)) continue;
         if (Physics.circleCircle(proj, enemy)) {
-          enemy.takeDamage(proj.damage);
-          proj.active = false;
-          this.entityManager.releaseProjectile(proj);
-          break; // Bullet can only hit one enemy
+          // Apply armor reduction
+          let dmg = proj.damage;
+          if (this.player.stats && this.player.stats.armor > 0) {
+            // Armor reduces damage by a percentage (capped at 80% reduction)
+            const armorReduction = Math.min(this.player.stats.armor / (this.player.stats.armor + 10), 0.8);
+            dmg = dmg * (1 - armorReduction);
+          }
+          enemy.takeDamage(dmg);
+          proj._hitEnemyIds.add(enemy.id);
+
+          // Pierce: decrement pierce count and continue to next enemy
+          if (proj.pierce > 0) {
+            proj.pierce--;
+            // Don't destroy projectile - it continues
+          } else {
+            proj.active = false;
+            this.entityManager.releaseProjectile(proj);
+            break; // No more pierce, bullet destroyed
+          }
         }
       }
     }
@@ -2329,7 +3108,13 @@ class Game {
       if (proj.owner === 'player') continue;
 
       if (Physics.circleCircle(proj, this.player)) {
-        this.player.hp -= proj.damage;
+        // Apply armor reduction
+        let dmg = proj.damage;
+        if (this.player.stats && this.player.stats.armor > 0) {
+          const armorReduction = Math.min(this.player.stats.armor / (this.player.stats.armor + 10), 0.8);
+          dmg = dmg * (1 - armorReduction);
+        }
+        this.player.hp -= dmg;
         this.camera.shake(5);
         proj.active = false;
         this.entityManager.releaseProjectile(proj);
@@ -2345,7 +3130,13 @@ class Game {
     for (const enemy of enemies) {
       if (!enemy.active) continue;
       if (Physics.circleCircle(enemy, this.player)) {
-        this.player.hp -= enemy.damage * 0.5; // contact damage (half)
+        // Apply armor reduction
+        let dmg = enemy.damage * 0.5;
+        if (this.player.stats && this.player.stats.armor > 0) {
+          const armorReduction = Math.min(this.player.stats.armor / (this.player.stats.armor + 10), 0.8);
+          dmg = dmg * (1 - armorReduction);
+        }
+        this.player.hp -= dmg; // contact damage (half)
         this.camera.shake(8);
         // Push enemy back slightly
         const pushDir = Math2.normalize(this.player.x - enemy.x, this.player.y - enemy.y);
@@ -2415,42 +3206,128 @@ class Game {
     const progress = Math.max(0, this.waveClearDisplayTimer / this.waveClearDisplayDuration);
 
     // Semi-transparent overlay
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
 
-    // Wave clear text
-    const pulse = 1 + 0.05 * Math.sin(this.waveClearDisplayTimer * 6);
     ctx.save();
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
     // Title
-    ctx.font = `bold ${Math.round(48 * pulse)}px monospace`;
+    const pulse = 1 + 0.05 * Math.sin(this.waveClearDisplayTimer * 6);
+    ctx.font = `bold ${Math.round(42 * pulse)}px monospace`;
     ctx.fillStyle = '#ffcc44';
     ctx.shadowColor = 'rgba(255, 200, 50, 0.5)';
     ctx.shadowBlur = 20;
-    ctx.fillText('WAVE CLEARED!', this.canvas.width / 2, this.canvas.height / 2 - 40);
+    ctx.fillText('WAVE CLEARED!', this.canvas.width / 2, this.canvas.height / 2 - 130);
+    ctx.shadowBlur = 0;
 
-    // Upgrade hint
+    // Subtitle
     ctx.font = '14px monospace';
-    ctx.fillStyle = 'rgba(255, 204, 68, 0.5)';
-    ctx.fillText(`(Upgrade selection coming soon...)`, this.canvas.width / 2, this.canvas.height / 2 + 10);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.fillText('Choose an upgrade', this.canvas.width / 2, this.canvas.height / 2 - 95);
 
-    // Countdown text
-    const readyText = this.waveClearReadyTimer > 0
-      ? `Next wave in ${Math.ceil(this.waveClearReadyTimer)}s...`
-      : '';
-    ctx.font = '16px monospace';
-    ctx.fillStyle = this.waveClearReadyTimer > 0
-      ? 'rgba(255, 255, 255, 0.4)'
-      : 'rgba(255, 255, 255, 0.8)';
-    ctx.fillText(readyText, this.canvas.width / 2, this.canvas.height / 2 + 40);
+    // Draw upgrade offer cards
+    this._upgradeCardBounds = [];
+    const offers = this.currentOffers;
+
+    if (offers && offers.length > 0) {
+      const cardWidth = Math.min(180, (this.canvas.width - 80) / offers.length);
+      const cardHeight = 140;
+      const totalCardsWidth = offers.length * (cardWidth + 10) - 10;
+      const startX = (this.canvas.width - totalCardsWidth) / 2;
+      const cardY = this.canvas.height / 2 - 50;
+
+      for (let i = 0; i < offers.length; i++) {
+        const offer = offers[i];
+        const cardX = startX + i * (cardWidth + 10);
+
+        // Store bounds for click detection
+        this._upgradeCardBounds.push({ x: cardX, y: cardY, w: cardWidth, h: cardHeight, id: offer.id });
+
+        // Card background with hover effect
+        const isHovered = this._upgradeHoveredCard === offer.id;
+        const cardGlow = 0.15 + (isHovered ? 0.15 : 0);
+        const borderColor = this.selectedOfferId === offer.id ? '#ffcc44' : 'rgba(255, 255, 255, 0.3)';
+
+        // Card shadow
+        if (isHovered || this.selectedOfferId === offer.id) {
+          ctx.shadowColor = 'rgba(255, 200, 50, 0.4)';
+          ctx.shadowBlur = 15;
+        }
+
+        ctx.fillStyle = `rgba(20, 30, 50, ${0.85 + cardGlow})`;
+        ctx.strokeStyle = borderColor;
+        ctx.lineWidth = isHovered || this.selectedOfferId === offer.id ? 2.5 : 1.5;
+
+        // Rounded rect
+        const r = 10;
+        ctx.beginPath();
+        ctx.moveTo(cardX + r, cardY);
+        ctx.lineTo(cardX + cardWidth - r, cardY);
+        ctx.arcTo(cardX + cardWidth, cardY, cardX + cardWidth, cardY + r, r);
+        ctx.arcTo(cardX + cardWidth, cardY + cardHeight, cardX + cardWidth - r, cardY + cardHeight, r);
+        ctx.arcTo(cardX, cardY + cardHeight, cardX, cardY + cardHeight - r, r);
+        ctx.arcTo(cardX, cardY, cardX + r, cardY, r);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.shadowBlur = 0;
+
+        // Icon
+        ctx.font = '28px monospace';
+        ctx.fillText(offer.icon, cardX + cardWidth / 2, cardY + 30);
+
+        // Name
+        ctx.font = 'bold 12px monospace';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(offer.name, cardX + cardWidth / 2, cardY + 60);
+
+        // Level info
+        ctx.font = '11px monospace';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+        ctx.fillText(`Level ${offer.currentLevel} → ${offer.nextLevel}`, cardX + cardWidth / 2, cardY + 78);
+
+        // Effect text
+        ctx.font = '11px monospace';
+        ctx.fillStyle = '#66ddff';
+        const effectLines = this._wrapText(offer.effectText, cardWidth - 20, 11);
+        for (let line = 0; line < effectLines.length; line++) {
+          ctx.fillText(effectLines[line], cardX + cardWidth / 2, cardY + 95 + line * 13);
+        }
+
+        // Selected indicator
+        if (this.selectedOfferId === offer.id) {
+          ctx.font = 'bold 12px monospace';
+          ctx.fillStyle = '#ffcc44';
+          ctx.fillText('✓ SELECTED', cardX + cardWidth / 2, cardY + cardHeight - 12);
+        }
+      }
+    } else {
+      // No eligible upgrades - all maxed
+      ctx.font = '14px monospace';
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+      ctx.fillText('All upgrades maxed!', this.canvas.width / 2, this.canvas.height / 2 - 30);
+    }
+
+    // Countdown text (only shown when there are offers)
+    if (offers && offers.length > 0) {
+      const readyText = this.waveClearReadyTimer > 0
+        ? `Tap an upgrade or wait ${Math.ceil(this.waveClearReadyTimer)}s...`
+        : 'Tap an upgrade card or the button below';
+      ctx.font = '13px monospace';
+      ctx.fillStyle = this.waveClearReadyTimer > 0
+        ? 'rgba(255, 255, 255, 0.4)'
+        : 'rgba(255, 255, 255, 0.7)';
+      ctx.fillText(readyText, this.canvas.width / 2, this.canvas.height / 2 + 85);
+    }
 
     // Progress bar (countdown)
     const barWidth = 200;
     const barHeight = 4;
     const barX = this.canvas.width / 2 - barWidth / 2;
-    const barY = this.canvas.height / 2 + 55;
+    const barY = this.canvas.height / 2 + 100;
     ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
     ctx.fillRect(barX, barY, barWidth, barHeight);
     const readyProgress = Math.min(1, Math.max(0, 1 - (this.waveClearReadyTimer / this.waveClearReadyDuration)));
@@ -2459,10 +3336,10 @@ class Game {
 
     // Continue button (appears after ready timer)
     if (this.waveClearButtonEnabled) {
-      const btnW = 220;
-      const btnH = 44;
+      const btnW = 200;
+      const btnH = 36;
       const btnX = this.canvas.width / 2 - btnW / 2;
-      const btnY = this.canvas.height / 2 + 75;
+      const btnY = this.canvas.height / 2 + 112;
 
       // Button background
       const glow = 0.15 + 0.1 * Math.sin(performance.now() / 300);
@@ -2472,8 +3349,7 @@ class Game {
       ctx.fillStyle = 'rgba(34, 100, 50, 0.85)';
       ctx.strokeStyle = '#44dd66';
       ctx.lineWidth = 2;
-      // Draw rounded rect using bezier curves (roundRect not in all browsers)
-      const r = 8; // corner radius
+      const r = 8;
       ctx.beginPath();
       ctx.moveTo(btnX + r, btnY);
       ctx.lineTo(btnX + btnW - r, btnY);
@@ -2486,11 +3362,11 @@ class Game {
       ctx.stroke();
 
       // Button text
-      ctx.font = 'bold 18px monospace';
+      ctx.font = 'bold 14px monospace';
       ctx.fillStyle = '#ffffff';
       ctx.shadowColor = 'rgba(68, 221, 102, 0.5)';
       ctx.shadowBlur = 8;
-      ctx.fillText('▶ NEXT WAVE', this.canvas.width / 2, this.canvas.height / 2 + 97);
+      ctx.fillText(this.selectedOfferId ? '▶ START WAVE' : '▶ SKIP & NEXT WAVE', this.canvas.width / 2, btnY + btnH / 2);
       ctx.shadowBlur = 0;
 
       // Store button bounds for click detection
@@ -2505,6 +3381,30 @@ class Game {
     }
 
     ctx.restore();
+  }
+
+  /**
+   * Helper to wrap text into lines of a given max width.
+   */
+  _wrapText(text, maxWidth, fontSize) {
+    const ctx = this.renderer.ctx;
+    ctx.font = `${fontSize}px monospace`;
+    const words = text.split(' ');
+    const lines = [];
+    let currentLine = '';
+
+    for (const word of words) {
+      const testLine = currentLine ? currentLine + ' ' + word : word;
+      const metrics = ctx.measureText(testLine);
+      if (metrics.width > maxWidth && currentLine) {
+        lines.push(currentLine);
+        currentLine = word;
+      } else {
+        currentLine = testLine;
+      }
+    }
+    if (currentLine) lines.push(currentLine);
+    return lines.length > 0 ? lines : [text];
   }
 
   _drawMinimap() {

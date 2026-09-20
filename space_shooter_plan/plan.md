@@ -229,22 +229,23 @@ Offers never contain an upgrade that has reached `maxLevel`. Weights can later m
 
 ---
 
-### Step 5 — Wave-Clear State & Transition Gate
+### Step 5 — Wave-Clear State & Transition Gate ✅ DONE
 **Goal:** Establish a reliable pause point between waves, without yet adding upgrade content or UI.
+> **Implemented** in `space_shooter.html` — `UPGRADE_SELECT` game state added to the state machine, `Spawner.waveCleared` flag + `onWaveCleared` callback for wave-clear detection (guarded by `wave > 0` to avoid triggering on init), simulation pauses all movement/collisions/firing in `_updateUpgradeSelect()`, full-screen overlay with pulsing "WAVE CLEARED!" title, countdown bar (2.5s gate), and an on-screen "▶ NEXT WAVE" button (click/tap/SPACE) to advance to the next wave, transition safety via `_setupWaveClear()` registration, reset on `_restart()`, and duplicate-event guards.
 
 | What | Details |
 |---|---|
-| Wave-clear detection | Reuse the existing spawner/enemy count; when a fully spawned wave has no enemies remaining, emit one wave-clear event. |
-| State transition | Add `playing → upgrade_select`; prevent the spawner from automatically starting the next wave. |
-| Simulation pause | While in `upgrade_select`, pause movement, collisions, firing, enemy projectiles, and spawning. |
-| Temporary feedback | Show a minimal “Wave Clear — choose an upgrade” prompt so the state can be verified before the card UI exists. |
-| Transition safety | Guard against duplicate wave-clear events and reset the gate on restart. |
+| `Wave-clear detection` | Spawner checks `wave > 0 && spawnQueue.length === 0 && activeEnemies === 0`; emits one-shot `onWaveCleared()` callback |
+| `State transition` | `playing → upgrade_select` via `Game.state` enum; spawner returns early when `waveCleared` is true |
+| `Simulation pause` | `_updatePlaying()` only runs when `state === PLAYING`; all physics, spawning, and collisions frozen during `UPGRADE_SELECT` |
+| `Temporary feedback` | Full-screen overlay with pulsing title, countdown bar (2.5s), and "▶ NEXT WAVE" button (gated by ready timer to prevent misclicks) |
+| `Transition safety` | `_setupWaveClear()` registered at game start; `waveCleared` reset on `_restart()` and `spawner.resume()` |
 
 **Deliverable:** Clearing a wave reliably freezes gameplay at one explicit between-wave state; Steps 1–4 need no redesign or replacement.
 
 ---
 
-### Step 6 — Upgrade Data, Build State & Offers
+### Step 6 — Upgrade Data, Build State & Offers ✅ **DONE**
 **Goal:** Create the data model that can generate a valid choice without directly mutating gameplay values.
 
 | What | Details |
