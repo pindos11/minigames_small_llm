@@ -1,8 +1,8 @@
 {
-    "name": "Match 3 Puzzle",
-    "short_name": "Match3",
-    "description": "A colorful match-3 puzzle game. Tap and swap to match gems!",
-    "start_url": "./match3.html",
+    "name": "Minigames Collection",
+    "short_name": "Minigames",
+    "description": "A collection of fun browser games including Match 3, Space Invaders, and more!",
+    "start_url": "./index.html",
     "display": "standalone",
     "background_color": "#667eea",
     "theme_color": "#667eea",
